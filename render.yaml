@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: koko
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: DATA_DIR
+        value: /var/data
+      - key: CREATOR_LIBRARY_SOURCE_URL
+        value: https://koko-kwai-coach.onrender.com/api/library
+      - key: CREATOR_LIBRARY_SYNC_INTERVAL_SEC
+        value: "86400"
+    disk:
+      name: koko-data
+      mountPath: /var/data
+      sizeGB: 1
