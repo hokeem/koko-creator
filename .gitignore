@@ -2,6 +2,7 @@ __pycache__/
 .DS_Store
 data/creator_submissions.json
 data/creator_thumbnail_cache.json
+data/creator_video_source_cache.json
 data/creator_script_html_cache/
 data/creator_sync_meta.json
 data/*.tmp
