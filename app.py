@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import html
+import http.client
 import json
 import mimetypes
 import os
 import re
 import secrets
+import shutil
+import subprocess
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -156,10 +159,32 @@ def content_type_labels() -> list[str]:
 
 
 def fetch_text(url: str, timeout: int = 20) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        charset = response.headers.get_content_charset() or "utf-8"
-        return response.read().decode(charset, errors="ignore")
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept-Encoding": "identity",
+            "Connection": "close",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            return response.read().decode(charset, errors="ignore")
+    except http.client.IncompleteRead as exc:
+        partial = bytes(exc.partial or b"").decode("utf-8", errors="ignore")
+        if partial.strip().endswith(("}", "]")):
+            return partial
+        curl = shutil.which("curl")
+        if not curl:
+            raise
+        completed = subprocess.run(
+            [curl, "-fsSL", "--max-time", str(max(5, timeout)), "-A", "Mozilla/5.0", url],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return completed.stdout.decode("utf-8", errors="ignore")
 
 
 def sync_library(force: bool = False) -> dict[str, Any]:
@@ -762,7 +787,24 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/admin/scripts":
             if not self.require_admin():
                 return
-            self.send_json({"entries": [public_admin_entry(entry) for entry in load_admin_entries()]})
+            q = urllib.parse.parse_qs(parsed.query)
+            try:
+                limit = max(1, min(500, int((q.get("limit") or ["500"])[0] or "500")))
+            except Exception:
+                limit = 500
+            try:
+                offset = max(0, int((q.get("offset") or ["0"])[0] or "0"))
+            except Exception:
+                offset = 0
+            search = str((q.get("search") or [""])[0] or "").strip().lower()
+            entries = [public_admin_entry(entry) for entry in load_admin_entries()]
+            if search:
+                entries = [
+                    entry for entry in entries
+                    if search in " ".join(str(entry.get(key) or "") for key in ["title", "summary", "content_type", "video_url"]).lower()
+                ]
+            total = len(entries)
+            self.send_json({"entries": entries[offset:offset + limit], "total": total, "limit": limit, "offset": offset})
             return
         if parsed.path == "/api/creator/recommendations":
             q = urllib.parse.parse_qs(parsed.query)
