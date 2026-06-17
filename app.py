@@ -28,6 +28,7 @@ STATIC_ROOT = BASE / "static"
 SEED_LIBRARY_FILE = BASE / "data" / "creator_online_library.json"
 LIBRARY_FILE = DATA_ROOT / "creator_online_library.json"
 SUBMISSIONS_FILE = DATA_ROOT / "creator_submissions.json"
+CREATORS_FILE = DATA_ROOT / "creator_profiles.json"
 THUMB_CACHE_FILE = DATA_ROOT / "creator_thumbnail_cache.json"
 VIDEO_SOURCE_CACHE_FILE = DATA_ROOT / "creator_video_source_cache.json"
 SCRIPT_HTML_CACHE_DIR = DATA_ROOT / "creator_script_html_cache"
@@ -530,6 +531,191 @@ def public_admin_entry(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalize_kwai_url(url: str) -> str:
+    text = str(url or "").strip()
+    if text and not text.startswith(("http://", "https://")):
+        text = "https://" + text
+    return text
+
+
+def kwai_handle_from_url(url: str) -> str:
+    path = urllib.parse.urlparse(normalize_kwai_url(url)).path
+    match = re.search(r"/@([^/?#]+)", path)
+    return match.group(1).strip() if match else ""
+
+
+def meta_content(html_text: str, key: str) -> str:
+    pattern = rf'<meta[^>]+(?:property|name)=["\']{re.escape(key)}["\'][^>]+content=["\']([^"\']+)["\']'
+    match = re.search(pattern, html_text, re.I)
+    return html.unescape(match.group(1).strip()) if match else ""
+
+
+def fetch_kwai_profile(url: str) -> dict[str, Any]:
+    profile_url = normalize_kwai_url(url)
+    if "kwai.com/" not in profile_url:
+        raise ValueError("请输入 Kwai 作者主页链接。")
+    html_text = fetch_text(profile_url, timeout=24)
+    title = meta_content(html_text, "og:title") or meta_content(html_text, "twitter:title")
+    if not title:
+        match = re.search(r"<title[^>]*>(.*?)</title>", html_text, re.I | re.S)
+        title = html.unescape(re.sub(r"\s+", " ", match.group(1)).strip()) if match else ""
+    handle = kwai_handle_from_url(profile_url)
+    name = ""
+    title_match = re.search(r"^(.*?)\s*\(@([^)]+)\)\s+on\s+Kwai", title)
+    if title_match:
+        name = title_match.group(1).strip()
+        handle = handle or title_match.group(2).strip()
+    else:
+        name = re.sub(r"\s*\(@.*?\)\s+on\s+Kwai.*$", "", title).strip()
+    avatar = meta_content(html_text, "og:image") or meta_content(html_text, "twitter:image")
+    description = meta_content(html_text, "og:description") or meta_content(html_text, "twitter:description")
+    follower_count = ""
+    for pattern in [
+        r'"(?:followerCount|followers|fanCount|fans)"\s*:\s*"?([\d,.万wkKmM]+)"?',
+        r'([\d,.]+[KkMm]?)\s*(?:followers|fans)',
+        r'([\d,.]+)\s*(?:Seguidores|seguidores)',
+    ]:
+        match = re.search(pattern, html_text, re.I)
+        if match:
+            follower_count = match.group(1).strip()
+            break
+    return {
+        "kwai_url": profile_url,
+        "kwai_id": handle,
+        "name": name or handle or "Kwai creator",
+        "avatar_url": avatar,
+        "followers": follower_count,
+        "bio": description,
+        "fetched_at": now_iso(),
+    }
+
+
+def load_creator_profiles() -> list[dict[str, Any]]:
+    data = read_json_file(CREATORS_FILE, [])
+    return [item for item in data if isinstance(item, dict)]
+
+
+def save_creator_profiles(profiles: list[dict[str, Any]]) -> None:
+    write_json_atomic(CREATORS_FILE, profiles[:2000])
+
+
+def category_tokens(categories: list[str]) -> set[str]:
+    tokens: set[str] = set()
+    mapping = {
+        "夫妻关系": ["夫妻", "妻子", "丈夫", "情侣", "夫妻吵架", "夫妻欺骗", "夫妻算计", "妻管严"],
+        "整蛊恶搞": ["整蛊", "恶作剧", "夫妻整蛊"],
+        "骗局反转": ["骗子", "反转", "隐瞒", "秘密", "发现"],
+        "赖账/金钱冲突": ["赖账", "欠钱", "付款", "金钱", "逃单"],
+        "偷吃/偷懒/耍小聪明": ["偷吃", "偷懒", "偷奸耍滑", "装病", "耍小聪明"],
+        "热门": [],
+    }
+    for category in categories:
+        text = str(category or "").strip()
+        if text:
+            tokens.add(text)
+        tokens.update(mapping.get(text, []))
+    return {token for token in tokens if token}
+
+
+def scripts_for_creator(categories: list[str], limit: int = 80) -> list[dict[str, Any]]:
+    tokens = category_tokens(categories)
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for idx, entry in enumerate(load_entries()):
+        public = public_entry(entry, 0)
+        text = " ".join(str(entry.get(key) or "") for key in ["content_type", "title", "whole_video_summary", "content_type_reasoning"])
+        score = 0
+        if not tokens:
+            score += 20
+        for token in tokens:
+            if token and token in text:
+                score += 18 if token == str(entry.get("content_type") or "") else 8
+        score += max(0, 12 - min(idx, 12))
+        if score > 0:
+            public["match_score"] = score
+            public["share_url"] = f"/script/{public['entry_id']}"
+            scored.append((score, public))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [entry for _, entry in scored[:limit]]
+
+
+def public_creator_profile(profile: dict[str, Any], include_scripts: bool = True) -> dict[str, Any]:
+    categories = [str(item or "").strip() for item in profile.get("categories") or [] if str(item or "").strip()]
+    scripts = scripts_for_creator(categories, 80) if include_scripts else []
+    submissions = read_json_file(SUBMISSIONS_FILE, [])
+    if not isinstance(submissions, list):
+        submissions = []
+    creator_keys = {str(profile.get("profile_id") or ""), str(profile.get("kwai_id") or "")}
+    matched_submissions = [
+        item for item in submissions
+        if isinstance(item, dict) and str(item.get("creator_id") or "") in creator_keys
+    ]
+    fake_submissions = []
+    if not matched_submissions and scripts:
+        fake_submissions = [{
+            "submission_id": f"fake-{profile.get('profile_id')}",
+            "entry_id": scripts[0].get("entry_id"),
+            "script_title": scripts[0].get("title"),
+            "submitted_title": "待回传：作者完成拍摄后会出现在这里",
+            "thumbnail_url": scripts[0].get("thumbnail_url"),
+            "video_url": "",
+            "status": "placeholder",
+            "created_at": "",
+        }]
+    return {
+        **profile,
+        "categories": categories,
+        "matched_scripts": scripts,
+        "priority_scripts": scripts[:6],
+        "folded_count": max(0, len(scripts) - 6),
+        "submissions": matched_submissions or fake_submissions,
+    }
+
+
+def create_or_update_creator_profile(payload: dict[str, Any], profile_id: str | None = None) -> dict[str, Any]:
+    categories = payload.get("categories")
+    if not isinstance(categories, list):
+        categories = [item.strip() for item in str(payload.get("category") or "").split(",") if item.strip()]
+    categories = [str(item or "").strip() for item in categories if str(item or "").strip()]
+    kwai_url = normalize_kwai_url(str(payload.get("kwai_url") or payload.get("url") or "").strip())
+    if not kwai_url:
+        raise ValueError("请输入 Kwai 作者主页链接。")
+    fetched = fetch_kwai_profile(kwai_url)
+    profiles = load_creator_profiles()
+    existing_index = -1
+    for idx, item in enumerate(profiles):
+        if profile_id and str(item.get("profile_id") or "") == profile_id:
+            existing_index = idx
+            break
+        if not profile_id and str(item.get("kwai_url") or "") == kwai_url:
+            existing_index = idx
+            break
+    base = profiles[existing_index] if existing_index >= 0 else {}
+    profile = {
+        **base,
+        **fetched,
+        "profile_id": str(base.get("profile_id") or profile_id or uuid4().hex),
+        "categories": categories,
+        "notes": str(payload.get("notes") or base.get("notes") or "").strip(),
+        "updated_at": now_iso(),
+        "created_at": str(base.get("created_at") or now_iso()),
+    }
+    if existing_index >= 0:
+        profiles[existing_index] = profile
+    else:
+        profiles.insert(0, profile)
+    save_creator_profiles(profiles)
+    return public_creator_profile(profile)
+
+
+def delete_creator_profile(profile_id: str) -> bool:
+    profiles = load_creator_profiles()
+    next_profiles = [item for item in profiles if str(item.get("profile_id") or "") != profile_id]
+    if len(next_profiles) == len(profiles):
+        return False
+    save_creator_profiles(next_profiles)
+    return True
+
+
 def invalidate_entry_cache(entry_id: str) -> None:
     cache = read_json_file(THUMB_CACHE_FILE, {})
     if isinstance(cache, dict) and entry_id in cache:
@@ -806,6 +992,23 @@ class Handler(BaseHTTPRequestHandler):
             total = len(entries)
             self.send_json({"entries": entries[offset:offset + limit], "total": total, "limit": limit, "offset": offset})
             return
+        if parsed.path == "/api/admin/creators":
+            if not self.require_admin():
+                return
+            profiles = [public_creator_profile(item) for item in load_creator_profiles()]
+            self.send_json({"creators": profiles, "total": len(profiles), "categories": content_type_labels()})
+            return
+        creator_match = re.fullmatch(r"/api/admin/creators/([0-9a-f]{32})", parsed.path)
+        if creator_match:
+            if not self.require_admin():
+                return
+            profile_id = creator_match.group(1)
+            for profile in load_creator_profiles():
+                if str(profile.get("profile_id") or "") == profile_id:
+                    self.send_json({"creator": public_creator_profile(profile)})
+                    return
+            self.send_json({"error": "Creator not found."}, status=404)
+            return
         if parsed.path == "/api/creator/recommendations":
             q = urllib.parse.parse_qs(parsed.query)
             selected = [str(v) for v in q.get("selected", [])]
@@ -919,6 +1122,23 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
             return
+        if parsed.path == "/api/admin/creators":
+            if not self.require_admin():
+                return
+            try:
+                self.send_json({"ok": True, "creator": create_or_update_creator_profile(self.read_body())}, status=201)
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+            return
+        creator_update_match = re.fullmatch(r"/api/admin/creators/([0-9a-f]{32})", parsed.path)
+        if creator_update_match:
+            if not self.require_admin():
+                return
+            try:
+                self.send_json({"ok": True, "creator": create_or_update_creator_profile(self.read_body(), creator_update_match.group(1))})
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+            return
         admin_update_match = re.fullmatch(r"/api/admin/scripts/([0-9a-f]{32})", parsed.path)
         if admin_update_match:
             if not self.require_admin():
@@ -936,6 +1156,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/creator/sync-library":
             self.send_json(sync_library(True))
+            return
+        self.send_error(404)
+
+    def do_DELETE(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        creator_match = re.fullmatch(r"/api/admin/creators/([0-9a-f]{32})", parsed.path)
+        if creator_match:
+            if not self.require_admin():
+                return
+            if not delete_creator_profile(creator_match.group(1)):
+                self.send_json({"error": "Creator not found."}, status=404)
+                return
+            self.send_json({"ok": True, "profile_id": creator_match.group(1)})
             return
         self.send_error(404)
 
