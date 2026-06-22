@@ -28,6 +28,7 @@ STATIC_ROOT = BASE / "static"
 SEED_LIBRARY_FILE = BASE / "data" / "creator_online_library.json"
 LIBRARY_FILE = DATA_ROOT / "creator_online_library.json"
 SUBMISSIONS_FILE = DATA_ROOT / "creator_submissions.json"
+INTAKE_FILE = DATA_ROOT / "creator_intake_submissions.json"
 CREATORS_FILE = DATA_ROOT / "creator_profiles.json"
 THUMB_CACHE_FILE = DATA_ROOT / "creator_thumbnail_cache.json"
 VIDEO_SOURCE_CACHE_FILE = DATA_ROOT / "creator_video_source_cache.json"
@@ -499,6 +500,60 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
     return submission
 
 
+
+def public_questions_with_other() -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
+    for question in QUESTIONS:
+        item = {key: value for key, value in question.items() if key != "options"}
+        item["options"] = [dict(option) for option in question.get("options") or []]
+        item["options"].append({"id": "other", "pt": "Outro", "zh": "其他", "types": [], "keywords": []})
+        questions.append(item)
+    return questions
+
+
+def save_intake(payload: dict[str, Any]) -> dict[str, Any]:
+    kwai_name = str(payload.get("kwai_name") or "").strip()
+    if not kwai_name:
+        raise ValueError("Kwai name is required.")
+    answers = payload.get("answers") if isinstance(payload.get("answers"), dict) else {}
+    clean_answers: dict[str, dict[str, str]] = {}
+    question_ids = {str(question.get("id") or "") for question in QUESTIONS}
+    for question_id, value in answers.items():
+        if str(question_id) not in question_ids or not isinstance(value, dict):
+            continue
+        clean_answers[str(question_id)] = {
+            "option_id": str(value.get("option_id") or "").strip()[:80],
+            "label_pt": str(value.get("label_pt") or "").strip()[:160],
+            "label_zh": str(value.get("label_zh") or "").strip()[:160],
+            "other_text": str(value.get("other_text") or "").strip()[:500],
+        }
+    if len(clean_answers) < len(QUESTIONS):
+        raise ValueError("Please answer all questions.")
+    intake = {
+        "intake_id": uuid4().hex,
+        "kwai_name": kwai_name[:160],
+        "kwai_url": str(payload.get("kwai_url") or "").strip()[:500],
+        "whatsapp": str(payload.get("whatsapp") or "").strip()[:120],
+        "answers": clean_answers,
+        "notes": str(payload.get("notes") or "").strip()[:1200],
+        "source": str(payload.get("source") or "creator-survey").strip()[:80],
+        "created_at": now_iso(),
+    }
+    intakes = read_json_file(INTAKE_FILE, [])
+    if not isinstance(intakes, list):
+        intakes = []
+    intakes.insert(0, intake)
+    write_json_atomic(INTAKE_FILE, intakes[:3000])
+    return intake
+
+
+def survey_html() -> str:
+    questions_json = json.dumps(public_questions_with_other(), ensure_ascii=False)
+    return f"""<!doctype html><html lang='pt-BR'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><title>Koko Creator Survey</title><style>
+*{{box-sizing:border-box}}body{{margin:0;background:linear-gradient(180deg,#fffaf5,#fff0df 52%,#fff8f2);color:#1f1f1f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif}}.phone{{width:min(100%,520px);margin:0 auto;min-height:100vh;padding:18px 18px 34px}}.top{{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}}.brand{{font-size:30px;font-weight:950;letter-spacing:-.03em}}.brand span{{color:#ff5f00;font-size:17px;margin-left:6px}}.lang{{display:flex;gap:8px}}button{{font:inherit;cursor:pointer}}.lang button{{border:1px solid rgba(255,95,0,.26);border-radius:999px;background:white;color:#ff5f00;font-weight:850;min-height:36px;padding:0 12px}}.hero{{overflow:hidden;border-radius:28px;background:linear-gradient(135deg,#fff,#ffe0ca);border:1px solid rgba(255,95,0,.16);padding:24px 20px;margin-bottom:16px;box-shadow:0 20px 48px rgba(85,45,10,.12)}}.kicker{{display:inline-flex;border:1px solid rgba(255,95,0,.26);border-radius:999px;padding:7px 11px;color:#ff5f00;font-size:12px;font-weight:900;background:#fffaf5}}h1{{margin:15px 0 10px;font-size:38px;line-height:1.03;letter-spacing:-.04em}}.accent{{color:#ff5f00}}p{{color:#656b73;line-height:1.55;margin:0}}.card{{border:1px solid rgba(255,95,0,.16);border-radius:24px;background:rgba(255,255,255,.86);padding:16px;margin:12px 0;box-shadow:0 14px 34px rgba(85,45,10,.08)}}label{{display:block;color:#1f1f1f;font-weight:900;margin:0 0 8px}}input,textarea{{width:100%;border:1px solid rgba(255,95,0,.22);border-radius:16px;background:#fffaf7;min-height:50px;padding:12px 14px;font:inherit;outline:none}}textarea{{min-height:92px;resize:vertical}}input:focus,textarea:focus{{border-color:#ff5f00;box-shadow:0 0 0 4px rgba(255,95,0,.10)}}.question h2{{margin:0 0 5px;font-size:22px}}.options{{display:grid;gap:10px;margin-top:14px}}.option{{border:1px solid rgba(255,95,0,.22);border-radius:18px;background:white;min-height:58px;padding:12px 14px;text-align:left;color:#1f1f1f;font-weight:850}}.option.active{{border-color:#ff5f00;background:#fff0e6;box-shadow:0 10px 24px rgba(255,95,0,.13)}}.other-input{{display:none;margin-top:10px}}.other-input.active{{display:block}}.primary{{width:100%;min-height:56px;border:0;border-radius:999px;background:linear-gradient(90deg,#ff6a00,#ff5200);color:white;font-size:18px;font-weight:950;box-shadow:0 16px 34px rgba(255,95,0,.32)}}.status{{min-height:24px;margin-top:12px;text-align:center;font-weight:850;color:#ff5f00}}.done{{display:none;text-align:center;padding:28px 18px}}.done.active{{display:block}}.form.hidden{{display:none}}.small{{font-size:12px;color:#858b92;margin-top:6px}}</style></head><body><main class='phone'><header class='top'><div class='brand'>koko <span>Creator</span></div><div class='lang'><button data-lang='pt'>PT</button><button data-lang='zh'>中文</button></div></header><section class='hero'><span class='kicker' data-i='kicker'>Pesquisa Koko Creator</span><h1 data-i='title'>Conte para a Koko <span class='accent'>como você grava</span></h1><p data-i='lead'>Responda em menos de 1 minuto. Vamos usar isso para recomendar roteiros que combinam com o seu perfil.</p></section><form class='form' id='survey-form'><section class='card'><label data-i='kwaiName'>Nome no Kwai</label><input name='kwai_name' placeholder='@seu_nome_no_kwai' required><div class='small' data-i='kwaiHint'>Use o nome que aparece no seu perfil.</div><label style='margin-top:14px' data-i='kwaiUrl'>Link do perfil (opcional)</label><input name='kwai_url' placeholder='https://www.kwai.com/@...'><label style='margin-top:14px' data-i='whatsapp'>WhatsApp / contato (opcional)</label><input name='whatsapp' placeholder='Seu contato'></section><div id='questions'></div><section class='card'><label data-i='notes'>Algo mais que precisamos saber? (opcional)</label><textarea name='notes' placeholder='Ex.: gravamos em casal, temos pouco tempo, preferimos histórias rápidas...'></textarea></section><button class='primary' type='submit' data-i='submit'>Enviar respostas</button><div class='status' id='status'></div></form><section class='done' id='done'><h1 data-i='doneTitle'>Recebemos suas respostas.</h1><p data-i='doneText'>Obrigado! A equipe Koko vai usar essas informações para entender seu perfil de criação.</p></section></main><script>
+const questions={questions_json};let lang=localStorage.getItem('koko_survey_lang')||'pt';const answers={{}};const text={{pt:{{kicker:'Pesquisa Koko Creator',title:'Conte para a Koko <span class="accent">como você grava</span>',lead:'Responda em menos de 1 minuto. Vamos usar isso para recomendar roteiros que combinam com o seu perfil.',kwaiName:'Nome no Kwai',kwaiHint:'Use o nome que aparece no seu perfil.',kwaiUrl:'Link do perfil (opcional)',whatsapp:'WhatsApp / contato (opcional)',notes:'Algo mais que precisamos saber? (opcional)',submit:'Enviar respostas',sending:'Enviando...',ok:'Enviado com sucesso.',err:'Confira as respostas e tente de novo.',otherPh:'Escreva sua resposta',doneTitle:'Recebemos suas respostas.',doneText:'Obrigado! A equipe Koko vai usar essas informações para entender seu perfil de criação.'}},zh:{{kicker:'Koko Creator 作者问卷',title:'告诉 Koko <span class="accent">你通常怎么拍</span>',lead:'1 分钟内完成。我们会用这些信息理解你的创作类型，并推荐更适合的脚本。',kwaiName:'Kwai 作者名称',kwaiHint:'填写主页里展示的名字或 @ID。',kwaiUrl:'作者主页链接（选填）',whatsapp:'WhatsApp / 联系方式（选填）',notes:'还有什么想补充？（选填）',submit:'提交问卷',sending:'提交中...',ok:'提交成功。',err:'请检查答案后重试。',otherPh:'请填写你的答案',doneTitle:'我们收到你的信息了。',doneText:'谢谢！Koko 团队会用这些信息理解你的创作类型。'}}}};function esc(s){{return String(s??'').replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]))}}function t(k){{return text[lang][k]||text.pt[k]||k}}function applyLang(){{document.documentElement.lang=lang==='zh'?'zh-CN':'pt-BR';document.querySelectorAll('[data-i]').forEach(el=>{{const key=el.dataset.i;if(text[lang][key])el.innerHTML=text[lang][key]}});document.querySelectorAll('.other-input input').forEach(i=>i.placeholder=t('otherPh'));renderQuestions()}}function renderQuestions(){{const box=document.querySelector('#questions');box.innerHTML=questions.map((q,idx)=>`<section class="card question"><h2>${{idx+1}}. ${{esc(q[lang]||q.pt)}}</h2><div class="options">${{q.options.map(o=>`<button class="option ${{answers[q.id]?.option_id===o.id?'active':''}}" type="button" data-q="${{esc(q.id)}}" data-opt="${{esc(o.id)}}" data-pt="${{esc(o.pt)}}" data-zh="${{esc(o.zh)}}">${{esc(o[lang]||o.pt)}}</button>`).join('')}}</div><div class="other-input ${{answers[q.id]?.option_id==='other'?'active':''}}"><input data-other="${{esc(q.id)}}" value="${{esc(answers[q.id]?.other_text||'')}}" placeholder="${{t('otherPh')}}"></div></section>`).join('')}}document.addEventListener('click',e=>{{const langBtn=e.target.closest('[data-lang]');if(langBtn){{lang=langBtn.dataset.lang;localStorage.setItem('koko_survey_lang',lang);applyLang();return}}const opt=e.target.closest('[data-opt]');if(opt){{answers[opt.dataset.q]={{option_id:opt.dataset.opt,label_pt:opt.dataset.pt,label_zh:opt.dataset.zh,other_text:''}};renderQuestions()}}}});document.addEventListener('input',e=>{{const input=e.target.closest('[data-other]');if(input&&answers[input.dataset.other])answers[input.dataset.other].other_text=input.value}});document.querySelector('#survey-form').addEventListener('submit',async e=>{{e.preventDefault();const status=document.querySelector('#status');const fd=new FormData(e.target);status.textContent=t('sending');try{{const payload=Object.fromEntries(fd.entries());payload.answers=answers;payload.source='creator-survey';const r=await fetch('/api/creator/intake',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(payload)}});if(!r.ok)throw new Error();status.textContent=t('ok');document.querySelector('#survey-form').classList.add('hidden');document.querySelector('#done').classList.add('active')}}catch(err){{status.textContent=t('err')}}}});applyLang();</script></body></html>"""
+
+
 def cookie_value(headers: Any, name: str) -> str:
     raw = str(headers.get("Cookie") or "")
     for part in raw.split(";"):
@@ -964,6 +1019,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path in {"/", "/creator-portal"}:
             self.send_html(page_html())
             return
+        if parsed.path in {"/creator-survey", "/creator-intake"}:
+            self.send_html(survey_html())
+            return
         if parsed.path in {"/admin", "/admin/scripts"}:
             self.send_html(admin_html())
             return
@@ -1059,6 +1117,14 @@ class Handler(BaseHTTPRequestHandler):
                 submissions = []
             self.send_json({"ok": True, "submissions": submissions, "total": len(submissions)})
             return
+        if parsed.path == "/api/admin/intakes":
+            if not self.require_admin():
+                return
+            intakes = read_json_file(INTAKE_FILE, [])
+            if not isinstance(intakes, list):
+                intakes = []
+            self.send_json({"ok": True, "intakes": intakes, "total": len(intakes)})
+            return
         if parsed.path == "/api/creator/submissions":
             self.send_json({"submissions": read_json_file(SUBMISSIONS_FILE, [])})
             return
@@ -1153,6 +1219,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self.send_json({"ok": True, "entry": update_admin_entry(admin_update_match.group(1), self.read_body())})
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+            return
+        if parsed.path == "/api/creator/intake":
+            try:
+                self.send_json({"ok": True, "intake": save_intake(self.read_body())}, status=201)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
             return
