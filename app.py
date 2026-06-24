@@ -1009,7 +1009,7 @@ function applyLang(){{document.documentElement.lang=lang==="zh"?"zh-CN":"pt-BR";
 function show(v){{if(v==="library")v="dashboard";if(["dashboard","saved","all-scripts"].includes(v)&&(!creatorUser||!hasProfile()))v="home";if(v==="choose"&&!creatorUser)v="home";if(v==="choose")step=0;document.querySelectorAll("[data-view]").forEach(x=>x.classList.toggle("active",x.dataset.view===v));if(v==="choose")renderQuestion();if(v==="dashboard")renderDashboard();if(v==="all-scripts")renderAllScripts();if(v==="saved")renderSaved();document.querySelectorAll(".bottom button").forEach(b=>b.classList.toggle("active",b.dataset.go===v||v==="all-scripts"&&b.dataset.go==="dashboard"));scrollTo({{top:0,behavior:"smooth"}})}}
 function renderQuestion(){{const q=questions[step];document.querySelector("#step-label").textContent=lang==="zh"?`${{t("step")}} ${{step+1}} / 3`:`${{t("step")}} ${{step+1}} de 3`;document.querySelector("#stepper").innerHTML=questions.map((_,i)=>`<button class="step ${{i===step?"active":""}}" type="button" data-step="${{i}}">${{i+1}}</button>`).join("");document.querySelector("#question").innerHTML=`<h1>${{esc(label(q))}}</h1><div class="options">${{q.options.map(o=>`<button class="option ${{answers[q.id]===o.id?"selected":""}}" data-answer="${{q.id}}" data-value="${{o.id}}">${{esc(label(o))}}</button>`).join("")}}</div>`;document.querySelector("#next-step span").textContent=step===questions.length-1?t("finish"):t("next");const prev=document.querySelector("#prev-step");if(prev){{prev.style.visibility=step===0?"hidden":"visible";prev.disabled=step===0}}}}
 function entryTimestamp(e){{const raw=e.script_date||e.created_at||e.saved_at||"";const n=Date.parse(raw);return Number.isNaN(n)?0:n}}
-async function loadEntries(){{const p=new URLSearchParams({{limit:80}});Object.values(answers).forEach(v=>p.append("selected",v));const r=await fetch(`/api/creator/recommendations?${{p.toString()}}&_=${{Date.now()}}`);const d=await r.json();if(!r.ok)throw new Error(d.error||"load failed");entries=(d.entries||[]).slice().sort((a,b)=>entryTimestamp(b)-entryTimestamp(a));counts();return entries}}
+async function loadEntries(){{const p=new URLSearchParams({{limit:500}});Object.values(answers).forEach(v=>p.append("selected",v));const r=await fetch(`/api/creator/recommendations?${{p.toString()}}&_=${{Date.now()}}`);const d=await r.json();if(!r.ok)throw new Error(d.error||"load failed");entries=(d.entries||[]).slice().sort((a,b)=>entryTimestamp(b)-entryTimestamp(a));counts();return entries}}
 function chips(){{const lookup=Object.fromEntries(questions.flatMap(q=>q.options.map(o=>[o.id,o])));return Object.values(answers).map(id=>lookup[id]).filter(Boolean).map(o=>`<span class="chip">${{esc(label(o))}} ✓</span>`).join("")}}
 function dayKey(d){{const y=d.getFullYear();const m=String(d.getMonth()+1).padStart(2,"0");const day=String(d.getDate()).padStart(2,"0");return `${{y}}-${{m}}-${{day}}`}}
 function todayKey(){{return dayKey(new Date())}}
@@ -1183,7 +1183,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/creator/recommendations":
             q = urllib.parse.parse_qs(parsed.query)
             selected = [str(v) for v in q.get("selected", [])]
-            limit = max(1, min(200, int((q.get("limit") or ["80"])[0] or "80")))
+            limit = max(1, min(500, int((q.get("limit") or ["500"])[0] or "500")))
             self.send_json(recommendation_payload(selected, limit))
             return
         if parsed.path.startswith("/script/"):
