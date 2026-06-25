@@ -1020,7 +1020,7 @@ def page_html() -> str:
 <div class="schedule-overlay" id="schedule-modal"><section class="schedule-sheet"><div class="schedule-head"><h2 id="schedule-title">加入拍摄日历</h2><button class="schedule-close" type="button" data-schedule-close>×</button></div><p class="schedule-note" id="schedule-note">选择你准备拍摄这个脚本的日期。</p><div class="calendar-grid" id="calendar-grid"></div><div class="schedule-actions"><button class="secondary" type="button" data-schedule-close>稍后再说</button><button class="primary" type="button" data-schedule-confirm>加入拍摄日历</button></div></section></div>
 <script>
 const questions={questions_json}; const profileKey="koko_profile_v1"; const workspaceKey="koko_workspace_v1"; const langKey="koko_lang"; const authKey="koko_creator_user_v1"; const profileUiKey="koko_creator_profile_ui_v1";
-const allowedPhones=new Set(["88996177106","13996855249","85987869447","95991319838","99991605452","88981741082","88998113027","86998490156","88999263655","88988853941","61982331597","88997515250","88988061712","666"]);
+const allowedPhones=new Set(["88996177106","13996855249","85987869447","95991319838","99991605452","88981741082","88998113027","86998490156","88999263655","88988853941","61982331597","88997515250","88988061712","88998411165","666"]);
 let lang=localStorage.getItem(langKey)||"pt"; let step=0; let savedTab="finished"; let featuredOffset=0; let entries=[]; let submissions=[];
 let answers=JSON.parse(localStorage.getItem(profileKey)||"null")||{{people:"duo",scene:"couple",humor:"twist"}};
 let workspace=JSON.parse(localStorage.getItem(workspaceKey)||"null")||{{saved:[],planned:[],finished:[],rejected:[],schedule:{{}}}};
