@@ -316,6 +316,7 @@ def score_entry(entry: dict[str, Any], selected: list[str], index: int) -> int:
     score += 10 if content_type != DEFAULT_CONTENT_TYPE else 0
     score += 8 if entry_script_url(entry) else 0
     score += 4 if entry.get("video_url") else 0
+    score += 1000 if entry.get("creator_featured") else 0
     score += max(0, 10 - min(index, 10))
     return score
 
