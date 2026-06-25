@@ -26,6 +26,7 @@ BASE = Path(__file__).resolve().parent
 DATA_ROOT = Path(os.environ.get("DATA_DIR", str(BASE / "data"))).expanduser()
 STATIC_ROOT = BASE / "static"
 SEED_LIBRARY_FILE = BASE / "data" / "creator_online_library.json"
+MANUAL_LIBRARY_FILE = BASE / "data" / "manual_creator_scripts.json"
 LIBRARY_FILE = DATA_ROOT / "creator_online_library.json"
 SUBMISSIONS_FILE = DATA_ROOT / "creator_submissions.json"
 INTAKE_FILE = DATA_ROOT / "creator_intake_submissions.json"
@@ -223,10 +224,21 @@ def sync_library(force: bool = False) -> dict[str, Any]:
 
 def load_entries_raw() -> list[dict[str, Any]]:
     sync_library(False)
+    manual = read_json_file(MANUAL_LIBRARY_FILE, [])
+    manual_entries = [entry for entry in manual if isinstance(entry, dict)] if isinstance(manual, list) else []
     data = read_json_file(LIBRARY_FILE, [])
     if not data and SEED_LIBRARY_FILE.exists():
         data = read_json_file(SEED_LIBRARY_FILE, [])
-    return [entry for entry in data if isinstance(entry, dict)]
+    seen: set[str] = set()
+    entries: list[dict[str, Any]] = []
+    for entry in [*manual_entries, *[item for item in data if isinstance(item, dict)]]:
+        entry_id = str(entry.get("entry_id") or "").strip()
+        if entry_id and entry_id in seen:
+            continue
+        if entry_id:
+            seen.add(entry_id)
+        entries.append(entry)
+    return entries
 
 
 def load_entries() -> list[dict[str, Any]]:
@@ -358,6 +370,23 @@ def sanitize_script_html(raw_html: str, base_url: str) -> str:
     return rewrite_relative_urls(text.strip(), base_url)
 
 
+def local_static_file_from_url(url: str) -> Path | None:
+    text = str(url or "").strip()
+    if not text:
+        return None
+    parsed = urllib.parse.urlparse(text)
+    path = parsed.path if parsed.scheme else text
+    if not path.startswith("/static/"):
+        return None
+    candidate = (STATIC_ROOT / urllib.parse.unquote(path.removeprefix("/static/"))).resolve()
+    try:
+        if STATIC_ROOT.resolve() in candidate.parents and candidate.is_file():
+            return candidate
+    except Exception:
+        return None
+    return None
+
+
 def script_html_for_entry(entry: dict[str, Any]) -> str:
     entry_id = str(entry.get("entry_id") or "").strip()
     if not re.fullmatch(r"[0-9a-f]{32}", entry_id):
@@ -368,6 +397,12 @@ def script_html_for_entry(entry: dict[str, Any]) -> str:
     url = abs_url(entry.get("pt_html_url") or entry.get("html_url") or entry.get("zh_html_url"))
     if not url:
         return ""
+    local_static = local_static_file_from_url(url)
+    if local_static:
+        clean = sanitize_script_html(local_static.read_text("utf-8", errors="ignore"), url)
+        SCRIPT_HTML_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(clean, "utf-8")
+        return clean
     raw = fetch_text(url, timeout=25)
     clean = sanitize_script_html(raw, url)
     SCRIPT_HTML_CACHE_DIR.mkdir(parents=True, exist_ok=True)
