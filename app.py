@@ -46,6 +46,7 @@ ADMIN_PASSWORD = os.environ.get("KOKO_CREATOR_ADMIN_PASSWORD", "koko")
 ADMIN_COOKIE = "koko_creator_admin"
 
 DEFAULT_CONTENT_TYPE = "待分类"
+UNKNOWN_CONTENT_TYPES = {DEFAULT_CONTENT_TYPE, "A classificar", "Sem categoria", "未分类", ""}
 
 
 QUESTIONS = [
@@ -166,6 +167,72 @@ def content_type_labels() -> list[str]:
     return labels
 
 
+def compact_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def collapse_repeated_text(value: object) -> str:
+    text = compact_text(value)
+    if not text:
+        return ""
+    for parts in range(2, 5):
+        if len(text) % parts == 0:
+            size = len(text) // parts
+            chunks = [text[i * size:(i + 1) * size].strip() for i in range(parts)]
+            if chunks[0] and all(chunk == chunks[0] for chunk in chunks):
+                return chunks[0]
+        words = text.split()
+        if len(words) % parts == 0:
+            size = len(words) // parts
+            chunks = [" ".join(words[i * size:(i + 1) * size]).strip() for i in range(parts)]
+            if chunks[0] and all(chunk == chunks[0] for chunk in chunks):
+                return chunks[0]
+    return text
+
+
+def first_repeated_url(value: object) -> str:
+    text = collapse_repeated_text(value)
+    urls = re.findall(r"https?://\S+", text)
+    return urls[0] if urls else text
+
+
+def inferred_content_type(entry: dict[str, Any]) -> str:
+    current = str(entry.get("content_type") or "").strip()
+    if current not in UNKNOWN_CONTENT_TYPES:
+        return current
+    text = " ".join(
+        str(entry.get(key) or "")
+        for key in ["title", "whole_video_summary", "summary", "content_type_reasoning", "video_url"]
+    ).lower()
+    rules = [
+        ("夫妻出轨", ["trai", "infiel", "amante", "outra mulher", "outro homem", "encontro com outra"]),
+        ("夫妻欺骗", ["finge", "mentira", "engan", "segredo", "revel", "descobre", "surpresa"]),
+        ("夫妻算计", ["plano", "arma", "combina", "estrateg", "aproveit", "vantagem"]),
+        ("夫妻吵架", ["esposa", "marido", "casal", "briga", "discute", "zangada", "reclama"]),
+        ("整蛊", ["pegadinha", "brincadeira", "susto", "troll", "limite"]),
+        ("赖账", ["dinheiro", "reais", "salário", "pagar", "pagamento", "cliente", "contrat"]),
+        ("偷奸耍滑", ["esperteza", "pregui", "desculpa", "jeitinho", "evitar"]),
+        ("骗子", ["golpe", "engan", "fraude", "entrevista"]),
+    ]
+    for label, keywords in rules:
+        if any(keyword in text for keyword in keywords):
+            return label
+    if any(word in text for word in ["esposa", "marido", "casal", "namorado", "namorada"]):
+        return "夫妻/情侣"
+    return "热门"
+
+
+def normalized_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    item = dict(entry)
+    item["title"] = collapse_repeated_text(item.get("title") or "")
+    item["whole_video_summary"] = collapse_repeated_text(
+        item.get("whole_video_summary") or item.get("summary") or ""
+    )
+    item["video_url"] = first_repeated_url(item.get("video_url") or "")
+    item["content_type"] = inferred_content_type(item)
+    return item
+
+
 def fetch_text(url: str, timeout: int = 20) -> str:
     req = urllib.request.Request(
         url,
@@ -265,34 +332,30 @@ def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         preview_url = f"{PUBLIC_BASE_URL}/manual_scripts/{entry_id}/{cover_path.name}"
     content_type = str(entry.get("content_type") or DEFAULT_CONTENT_TYPE)
     content_type = {
-        "待分类": "A classificar",
-        "夫妻欺骗": "Conflito de casal",
-        "夫妻/情侣": "Casal / namorados",
-        "夫妻情感": "Casal / namorados",
-        "隐瞒反转": "Segredo e revelacao",
-        "骗局反转": "Golpe e reviravolta",
-        "整蛊恶搞": "Pegadinha",
-        "赖账/金钱冲突": "Conflito por dinheiro",
-        "偷吃/偷懒/耍小聪明": "Esperteza cotidiana",
+        "A classificar": DEFAULT_CONTENT_TYPE,
+        "Sem categoria": DEFAULT_CONTENT_TYPE,
     }.get(content_type, content_type)
     imported = {
         "entry_id": entry_id,
         "parent_job_id": str(entry.get("parent_job_id") or f"creator_import_{entry_id}"),
         "created_at": str(entry.get("created_at") or now_iso()),
         "saved_at": str(entry.get("saved_at") or now_iso()),
-        "video_url": str(entry.get("video_url") or payload.get("video_url") or ""),
-        "title": str(entry.get("title") or script_json.get("title") or "Roteiro importado"),
+        "video_url": first_repeated_url(entry.get("video_url") or payload.get("video_url") or ""),
+        "title": collapse_repeated_text(entry.get("title") or script_json.get("title") or "Roteiro importado"),
         "content_type": content_type,
         "content_type_source": str(entry.get("content_type_source") or "manual"),
         "content_type_reasoning": str(entry.get("content_type_reasoning") or "Imported from Creator admin Excel."),
         "content_type_confidence": str(entry.get("content_type_confidence") or "high"),
-        "whole_video_summary": str(entry.get("whole_video_summary") or script_json.get("whole_video_summary") or ""),
+        "whole_video_summary": collapse_repeated_text(
+            entry.get("whole_video_summary") or script_json.get("whole_video_summary") or ""
+        ),
         "html_url": f"{PUBLIC_BASE_URL}/manual_scripts/{entry_id}/script_table_pt.html",
         "pt_html_url": f"{PUBLIC_BASE_URL}/manual_scripts/{entry_id}/script_table_pt.html",
         "zh_html_url": f"{PUBLIC_BASE_URL}/manual_scripts/{entry_id}/script_table_pt.html",
         "preview_image_url": preview_url,
         "source": "creator_direct_import",
     }
+    imported = normalized_entry(imported)
     upsert_manual_entry(imported)
     invalidate_entry_cache(entry_id)
     return {"ok": True, "entry": public_admin_entry(imported), "share_url": f"/script/{entry_id}"}
@@ -330,7 +393,7 @@ def load_entries() -> list[dict[str, Any]]:
             continue
         if isinstance(override, dict) and override.get("hidden"):
             continue
-        entries.append(apply_entry_override(entry, override))
+        entries.append(normalized_entry(apply_entry_override(entry, override)))
     return entries
 
 
@@ -342,7 +405,7 @@ def load_admin_entries() -> list[dict[str, Any]]:
         override = overrides.get(entry_id)
         if isinstance(override, dict) and override.get("deleted"):
             continue
-        entries.append(apply_entry_override(entry, override))
+        entries.append(normalized_entry(apply_entry_override(entry, override)))
     return sorted(entries, key=lambda item: str(item.get("saved_at") or item.get("created_at") or ""), reverse=True)
 
 
@@ -360,7 +423,7 @@ def entry_summary(entry: dict[str, Any]) -> str:
     for key in ["whole_video_summary", "summary", "content_summary", "description", "title"]:
         text = str(entry.get(key) or "").strip()
         if text:
-            return text
+            return collapse_repeated_text(text)
     return ""
 
 
@@ -412,6 +475,7 @@ def abs_url(url: object, base_url: str = "https://koko-kwai-coach.onrender.com")
 
 
 def public_entry(entry: dict[str, Any], score: int) -> dict[str, Any]:
+    entry = normalized_entry(entry)
     entry_id = str(entry.get("entry_id") or "").strip()
     script_date = str(entry.get("saved_at") or entry.get("created_at") or "").strip()
     return {
@@ -784,6 +848,7 @@ def is_admin_authed(headers: Any) -> bool:
 
 
 def public_admin_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    entry = normalized_entry(entry)
     entry_id = str(entry.get("entry_id") or "").strip()
     return {
         "entry_id": entry_id,
@@ -1181,24 +1246,25 @@ function hydrateVideo(e){{if(!e.video_url)return;setTimeout(async()=>{{const box
 function scriptLoading(){{return `<section class="script-loading"><b>${{lang==="zh"?"脚本加载中请耐心等待":"Roteiro carregando, aguarde um momento"}}</b><span>${{lang==="zh"?"正在整理完整脚本内容，加载完成后会自动显示。":"Estamos preparando o roteiro completo. Ele aparecerá automaticamente."}}</span><div class="script-progress" aria-hidden="true"></div></section>`}}
 function normalizeLabel(s){{return String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[：:]/g,"").trim()}}
 function compactText(s){{return String(s||"").replace(/\s+/g," ").trim()}}
-function ptTag(value){{const raw=String(value||"").trim();const key=raw.toLowerCase();const map={{"待分类":"A classificar","夫妻欺骗":"Conflito de casal","夫妻/情侣":"Casal / namorados","夫妻情感":"Casal / namorados","隐瞒反转":"Segredo e revelacao","骗局反转":"Golpe e reviravolta","整蛊恶搞":"Pegadinha","赖账/金钱冲突":"Conflito por dinheiro","偷吃/偷懒/耍小聪明":"Esperteza cotidiana",saved:"Salvo",planned:"Planejado",finished:"Gravado"}};return map[raw]||map[key]||raw.replace(/_/g," ")}}
+function ptTag(value){{const raw=String(value||"").trim();const key=raw.toLowerCase();const map={{"待分类":"A classificar","热门":"Popular","夫妻欺骗":"Conflito de casal","夫妻/情侣":"Casal / namorados","夫妻情感":"Casal / namorados","夫妻吵架":"Discussão de casal","夫妻出轨":"Traição de casal","夫妻算计":"Plano de casal","妻管严":"Controle no casal","夫妻整蛊":"Pegadinha de casal","隐瞒反转":"Segredo e revelação","骗局反转":"Golpe e reviravolta","整蛊恶搞":"Pegadinha","整蛊":"Pegadinha","赖账/金钱冲突":"Conflito por dinheiro","赖账":"Conflito por dinheiro","偷吃/偷懒/耍小聪明":"Esperteza cotidiana","偷奸耍滑":"Esperteza cotidiana","骗子":"Golpe","撬墙角":"Triângulo amoroso","偷吃东西":"Comer escondido",saved:"Salvo",planned:"Planejado",finished:"Gravado"}};return map[raw]||map[key]||raw.replace(/_/g," ")}}
 const storyboardDemoUrl="/static/storyboard_sick_wife_demo.png";
 function hasChinese(s){{return /[\u4e00-\u9fff]/.test(String(s||""))}}
 function collapseRepeatedText(s){{let text=compactText(s);if(!text)return "";for(let parts=2;parts<=4;parts++){{if(text.length%parts)continue;const size=text.length/parts;const chunk=text.slice(0,size).trim();if(chunk&&Array.from({{length:parts}},(_,i)=>text.slice(i*size,(i+1)*size).trim()).every(x=>x===chunk))return chunk}}const words=text.split(/\s+/);for(let parts=2;parts<=4;parts++){{if(words.length%parts)continue;const size=words.length/parts;const chunk=words.slice(0,size).join(" ");let ok=true;for(let i=1;i<parts;i++){{if(words.slice(i*size,(i+1)*size).join(" ")!==chunk){{ok=false;break}}}}if(ok)return chunk}}return text}}
 function uniqueCellValues(cells){{const out=[];const seen=new Set();cells.map(preferPortugueseText).map(collapseRepeatedText).forEach(v=>{{const key=normalizeLabel(v);if(!v||seen.has(key))return;seen.add(key);out.push(v)}});return out}}
+function uniqueCards(cards){{const out=[];const seen=new Set();(cards||[]).forEach(c=>{{const title=collapseRepeatedText(preferPortugueseText(c.title||""));const body=collapseRepeatedText(preferPortugueseText(c.body||""));const key=normalizeLabel(`${{title}} ${{body}}`);if(!body||seen.has(key))return;seen.add(key);out.push({{title:title||"Ponto-chave",body}})}});return out.slice(0,6)}}
 function preferPortugueseText(s){{let text=compactText(s);if(!text)return "";if(hasChinese(text)&&/[A-Za-zÀ-ÿ]/.test(text))text=text.split(/[\u4e00-\u9fff]/)[0].trim();text=text.replace(/[，。；、：！？][^A-Za-zÀ-ÿ]*$/,"").trim();return collapseRepeatedText(text)}}
 function ptTitle(e){{return preferPortugueseText(e.title)||String(e.title||"Roteiro")}}
 function sketchSvg(i){{const variants=[`<path d="M18 82 H92 M22 82 Q42 60 62 82 M50 24 q18 4 19 22 q-3 24-20 28 q-17-7-18-28 q2-18 19-22Z"/><path d="M48 75 v34 M30 100 q18-18 38 0 M70 38 h30 v82"/>`,`<path d="M16 88 h96 M54 26 q18 4 18 23 q-2 22-20 26 q-19-6-20-26 q3-18 22-23Z"/><path d="M50 74 q-6 26-2 48 M26 98 q24-14 50 0 M78 34 h28 v92 M36 50 l-18 22"/>`,`<path d="M18 88 h94 M58 30 q17 3 18 23 q-3 22-20 26 q-18-6-19-26 q2-19 21-23Z"/><path d="M54 77 q-10 26-1 48 M28 98 q22-12 49 2 M82 36 h24 v88"/>`,`<path d="M18 28 v100 M18 96 h110 M42 76 l38-28 M43 82 l38-28 M76 43 q18 10 32 28"/><path d="M70 74 q16 10 32 22"/>`,`<path d="M14 92 h114 M50 24 q18 3 20 22 q-2 24-20 28 q-18-6-20-28 q2-18 20-22Z"/><path d="M48 74 q-6 30 0 52 M24 102 q24-16 53 0 M86 52 q10 6 20 20 M92 82 q10 7 25 6"/>`,`<path d="M22 68 h78 M22 102 h80 M50 68 l-14 34 M82 68 l-14 34"/><path d="M86 64 q26 5 30 28 q-8 16-26 12 M94 86 l30-16"/>`,`<path d="M64 24 q18 6 20 24 q-4 24-23 28 q-18-8-17-29 q4-19 20-23Z"/><path d="M60 78 v48 M36 110 q25-14 51 0 M22 34 h28 M24 34 v88"/>`,`<path d="M16 92 h112 M54 24 q18 4 20 23 q-2 23-21 27 q-18-6-19-27 q3-19 20-23Z"/><path d="M52 76 q-4 27 2 50 M28 102 q24-14 52 1 M92 50 q12 7 24 24 M98 84 q11 7 26 5"/>`,`<path d="M68 28 q20 6 21 25 q-4 24-23 28 q-19-7-19-29 q3-20 21-24Z"/><path d="M48 88 q20 18 44 0 M45 102 q26 22 54 0 M44 118 h58"/>`];return `<svg viewBox="0 0 132 132" aria-hidden="true"><rect width="132" height="132" fill="#fbfaf7"/><path d="M0 0h132v132H0z" fill="none" stroke="#222" stroke-width="1.2"/>${{variants[i%variants.length]}}</svg>`}}
 function collectReferenceImages(doc,e){{const imgs=[...doc.querySelectorAll("img")].map(img=>img.getAttribute("src")||"").filter(Boolean);if(e.thumbnail_url)imgs.unshift(e.thumbnail_url);return imgs.filter((x,i,a)=>x&&a.indexOf(x)===i).slice(0,4)}}
 function portugueseDemoScript(e){{return {{original:"https://www.kwai.com/@Suelen_michelini/video/5209970453127473266",main:"O vídeo começa com a esposa ficando doente; ela parece fraca e sem forças, e, com um ar carinhoso, pede atenção e cuidados ao marido. Embora o marido pareça um pouco resignado, ele cuida dela com carinho, lavando e estendendo suas roupas.",points:["Interação carinhosa entre os cônjuges"],adaptable:["O enredo da doença"],images:e.thumbnail_url?[e.thumbnail_url]:[],segments:[{{time:"00:00-00:05",image:"À porta do quarto; esposa vestida com pijama, com aspecto frágil.",action:"A esposa está encostada na porta, com uma expressão de fraqueza e desânimo.",dialogue:"Legenda: Quando eu fico doente"}},{{time:"00:05-00:10",image:"Quarto; esposa deitada na cama, coberta com o cobertor.",action:"A esposa está deitada na cama, parecendo exausta; o marido a observa.",dialogue:"Esposa: Ai, meu Deus, eu tô horrível. Eu acho que eu não passo."}},{{time:"00:10-00:15",image:"Quarto; esposa deitada na cama, marido ao lado da cama.",action:"A esposa olha para o marido com um tom de voz carinhoso e aponta para as roupas.",dialogue:"Esposa: Lava a roupa pra mim."}},{{time:"00:15-00:20",image:"Lavanderia; marido segurando roupas; máquina de lavar e roupas ao fundo.",action:"O marido segura uma pilha de roupas, com uma expressão um pouco hesitante.",dialogue:""}},{{time:"00:20-00:25",image:"Quarto; esposa deitada na cama, pegando o celular.",action:"A esposa pega o celular e parece estar fazendo algo nele.",dialogue:""}},{{time:"00:25-00:30",image:"Quarto; esposa olhando para o celular, marido ao lado.",action:"Enquanto olha para o celular, a esposa fala com o marido em tom de reclamação.",dialogue:"Esposa: Que você não tá me dando atenção. Eu tô aqui morrendo, você nem tá vendo."}},{{time:"00:30-00:33",image:"Quarto; esposa segurando a chaleira, marido ao lado.",action:"A esposa chama o marido com o sino do celular, e ele se aproxima segurando uma chaleira.",dialogue:""}}]}}}}
-function readInsightCards(doc,titlePattern){{const cards=[];const headings=[...doc.querySelectorAll("h2,h3")];const h=headings.find(x=>titlePattern.test(normalizeLabel(x.textContent)));if(!h)return cards;let node=h.nextElementSibling;while(node&&!/^H2$/i.test(node.tagName)){{node.querySelectorAll(".insight").forEach(card=>{{const parts=[...card.children].map(x=>preferPortugueseText(x.textContent)).filter(Boolean);if(parts.length)cards.push({{title:parts[0],body:parts.slice(1).join(" ")}})}});node=node.nextElementSibling}}return cards.slice(0,6)}}
-function extractScriptData(raw,e){{const doc=new DOMParser().parseFromString(String(raw||""),"text/html");const data={{original:e.video_url||"",main:preferPortugueseText(e.summary)||"",points:[],adaptable:[],pointCards:readInsightCards(doc,/pontos-chave|pontos principais/),adaptableCards:readInsightCards(doc,/planos de substituicao|partes.*adapt/),segments:[],images:collectReferenceImages(doc,e)}};doc.querySelectorAll("tr").forEach(tr=>{{const cells=[...tr.children].map(td=>preferPortugueseText(td.textContent));if(cells.length<2)return;const key=normalizeLabel(cells[0]);const val=uniqueCellValues(cells.slice(1)).join(" ").trim();if(/video original|original/.test(key))data.original=val||data.original;if(/conteudo principal|resumo geral|resumo do video|contenido principal|内容|整体/.test(key))data.main=val||data.main;if(/pontos principais|points?|ponto principal|看点|爆点|重点/.test(key))data.points.push(val);if(/partes.*adapt|adaptadas|adaptavel|适配|替换/.test(key))data.adaptable.push(val);}});doc.querySelectorAll("table").forEach(table=>{{const rows=[...table.querySelectorAll("tr")].map(tr=>[...tr.children].map(td=>preferPortugueseText(td.textContent))).filter(r=>r.length);const headIndex=rows.findIndex(r=>r.some(c=>/tempo|时间/i.test(c))&&(r.some(c=>/imagem|conteudo visual|visual|画面|image/i.test(c))||r.length>=4));if(headIndex<0)return;const heads=rows[headIndex].map(normalizeLabel);const idx=n=>heads.findIndex(h=>n.some(x=>h.includes(x)));let ti=idx(["tempo","时间"]), im=idx(["imagem","conteudo visual","visual","画面","image"]), ac=idx(["acoes","acao","动作","action"]), di=idx(["dialogos","dialogo","台词","对白","dialogue"]);if(ti<0&&heads.length>=4){{ti=0;im=1;ac=2;di=3}}rows.slice(headIndex+1).forEach(r=>{{if(ti<0||!r[ti])return;data.segments.push({{time:r[ti]||"",image:im>=0?r[im]||"":"",action:ac>=0?r[ac]||"":"",dialogue:di>=0?r[di]||"":""}})}})}});data.points=splitBrief(data.points).filter(x=>x&&x!==data.main);data.adaptable=splitBrief(data.adaptable);return data}}
+function readInsightCards(doc,titlePattern){{const cards=[];const headings=[...doc.querySelectorAll("h2,h3")];const h=headings.find(x=>titlePattern.test(normalizeLabel(x.textContent)));if(!h)return cards;let node=h.nextElementSibling;while(node&&!/^H2$/i.test(node.tagName)){{node.querySelectorAll(".insight").forEach(card=>{{const parts=[...card.children].map(x=>preferPortugueseText(x.textContent)).filter(Boolean);if(parts.length)cards.push({{title:parts[0],body:parts.slice(1).join(" ")}})}});node=node.nextElementSibling}}return uniqueCards(cards)}}
+function extractScriptData(raw,e){{const doc=new DOMParser().parseFromString(String(raw||""),"text/html");const data={{original:collapseRepeatedText(preferPortugueseText(e.video_url||"")),main:collapseRepeatedText(preferPortugueseText(e.summary)||""),points:[],adaptable:[],pointCards:readInsightCards(doc,/pontos-chave|pontos principais/),adaptableCards:readInsightCards(doc,/planos de substituicao|partes.*adapt/),segments:[],images:collectReferenceImages(doc,e)}};doc.querySelectorAll("tr").forEach(tr=>{{const cells=[...tr.children].map(td=>preferPortugueseText(td.textContent));if(cells.length<2)return;const key=normalizeLabel(cells[0]);const val=uniqueCellValues(cells.slice(1)).join(" ").trim();if(/video original|original/.test(key))data.original=val||data.original;if(/conteudo principal|resumo geral|resumo do video|contenido principal|内容|整体/.test(key))data.main=val||data.main;if(/pontos principais|points?|ponto principal|看点|爆点|重点/.test(key))data.points.push(val);if(/partes.*adapt|adaptadas|adaptavel|适配|替换/.test(key))data.adaptable.push(val);}});doc.querySelectorAll("table").forEach(table=>{{const rows=[...table.querySelectorAll("tr")].map(tr=>[...tr.children].map(td=>preferPortugueseText(td.textContent))).filter(r=>r.length);const headIndex=rows.findIndex(r=>r.some(c=>/tempo|时间/i.test(c))&&(r.some(c=>/imagem|conteudo visual|visual|画面|image/i.test(c))||r.length>=4));if(headIndex<0)return;const heads=rows[headIndex].map(normalizeLabel);const idx=n=>heads.findIndex(h=>n.some(x=>h.includes(x)));let ti=idx(["tempo","时间"]), im=idx(["imagem","conteudo visual","visual","画面","image"]), ac=idx(["acoes","acao","动作","action"]), di=idx(["dialogos","dialogo","台词","对白","dialogue"]);if(ti<0&&heads.length>=4){{ti=0;im=1;ac=2;di=3}}rows.slice(headIndex+1).forEach(r=>{{if(ti<0||!r[ti])return;data.segments.push({{time:r[ti]||"",image:im>=0?r[im]||"":"",action:ac>=0?r[ac]||"":"",dialogue:di>=0?r[di]||"":""}})}})}});data.points=splitBrief(data.points).filter(x=>x&&x!==data.main);data.adaptable=splitBrief(data.adaptable);return data}}
 function splitBrief(list){{const out=[];const seen=new Set();list.flatMap(x=>String(x||"").split(/(?:\\n|；|;|\d+[.、])/).map(preferPortugueseText).map(collapseRepeatedText).filter(Boolean)).forEach(v=>{{const key=normalizeLabel(v);if(!seen.has(key)){{seen.add(key);out.push(v)}}}});return out.slice(0,6)}}
 function storyFrameHtml(f,img,i){{return `<div class="story-frame">${{sketchSvg(i)}}<span>${{esc(f.time||`00:${{String(i*5).padStart(2,"0")}}`)}}</span></div>`}}
 function timeCellText(t){{const parts=String(t||"").split("-");return parts.map(x=>esc(x)).join("<br>")}}
 function storyboardGrid(segs){{return {{cols:3,rows:3}}}}
 function scriptTableRows(segs,cover){{const grid=storyboardGrid(segs);return segs.map((s,i)=>{{const sx=i%grid.cols,sy=Math.floor(i/grid.cols);return `<tr><td class="time-cell">${{timeCellText(s.time)}}</td><td><div class="shot-cell"><div class="shot-thumb" style="--cols:${{grid.cols}};--rows:${{grid.rows}};--sx:${{sx}};--sy:${{sy}}"><img src="${{esc(cover)}}" alt="Storyboard frame"></div><div class="shot-text">${{esc(s.image)}}</div></div></td><td>${{esc(s.action)}}</td><td>${{esc(s.dialogue)}}</td></tr>`}}).join("")}}
-function insightSection(title,cards){{if(!cards.length)return "";return `<section class="insight-section"><h3>${{esc(title)}}</h3><div class="insight-cards">${{cards.map(c=>`<article><b>${{esc(c.title)}}</b><p>${{esc(c.body)}}</p></article>`).join("")}}</div></section>`}}
+function insightSection(title,cards){{cards=uniqueCards(cards);if(!cards.length)return "";return `<section class="insight-section"><h3>${{esc(title)}}</h3><div class="insight-cards">${{cards.map(c=>`<article><b>${{esc(c.title)}}</b><p>${{esc(c.body)}}</p></article>`).join("")}}</div></section>`}}
 function cleanScriptHtml(raw,e){{const d=extractScriptData(raw,e);const fallbackPointCards=d.points.map((x,i)=>({{title:i===0?"Ponto-chave":"Ponto-chave "+(i+1),body:x}}));const fallbackAdaptCards=d.adaptable.map((x,i)=>({{title:i===0?"Plano de substituição":"Plano "+(i+1),body:x}}));const brief=[{{label:"Video original",value:d.original}},{{label:"Conteúdo principal",value:d.main}}].filter(x=>x.value);const segs=d.segments.slice(0,9);const cover=coverImage(e);return `<article class="script-html"><div class="clean-script"><section class="brief-list">${{brief.map(x=>`<div class="brief-card"><b>${{esc(x.label)}}</b><p>${{esc(x.value)}}</p></div>`).join("")}}</section>${{insightSection("Pontos-chave",d.pointCards.length?d.pointCards:fallbackPointCards)}}${{insightSection("Planos de substituição",d.adaptableCards.length?d.adaptableCards:fallbackAdaptCards)}}${{segs.length?`<section class="script-table-card"><div class="script-table-title">Tabela do roteiro</div><table class="script-table"><colgroup><col class="col-time"><col class="col-image"><col class="col-action"><col class="col-dialogue"></colgroup><thead><tr><th>Tempo</th><th>Imagem</th><th>Ações</th><th>Diálogos</th></tr></thead><tbody>${{scriptTableRows(segs,cover)}}</tbody></table></section>`:""}}</div></article>`}}
 function renderScriptSlot(html,e){{return html?cleanScriptHtml(html,e):`<article class="script-html"><div class="clean-script"><div class="brief-card"><b>Conteúdo principal</b><p>${{esc(e.summary||"")}}</p></div></div></article>`}}
 function renderDetail(e){{const s=statusOf(e.entry_id);const liked=ids("saved").has(e.entry_id);document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><div class="detail-content">${{detailCover(e)}}<h2 class="detail-title">${{esc(ptTitle(e))}}</h2><div class="tags"><span class="tag">${{esc(ptTag(e.content_type))}}</span><span class="tag">1-3 min</span>${{s?`<span class="tag">${{esc(ptTag(s))}}</span>`:""}}</div><div class="share-box" id="share-output"></div><div id="script-html-slot">${{e.script_html?renderScriptSlot(e.script_html,e):scriptLoading()}}</div>${{videoPreview(e)}}<section class="submit"><b>${{t("submitTitle")}}</b><p class="lead">${{t("submitHint")}}</p><input type="url" data-submit-url="${{esc(e.entry_id)}}" placeholder="${{t("submitPlaceholder")}}"><button class="primary" data-submit="${{esc(e.entry_id)}}">${{t("submitButton")}}</button><div id="submit-status-${{esc(e.entry_id)}}"></div></section><div class="social-actions"><button class="social-btn" type="button" data-status="${{liked?"":"saved"}}" data-entry="${{esc(e.entry_id)}}" aria-label="${{t("save")}}">♡<span>${{liked?(lang==="zh"?"已收藏":"Salvo"):(lang==="zh"?"收藏":"Salvar")}}</span></button><button class="social-btn" type="button" data-copy-share="${{esc(e.entry_id)}}" aria-label="${{lang==="zh"?"复制分享链接":"Copiar link"}}">↗<span>${{lang==="zh"?"分享":"Compartilhar"}}</span></button></div></div>`}}
