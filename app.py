@@ -253,6 +253,8 @@ def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         write_json_atomic(static_dir / "script_table_pt.json", script_json)
     preview_url = ""
     cover_b64 = str(payload.get("cover_b64") or "").strip()
+    if not cover_b64:
+        raise ValueError("Missing storyboard cover image.")
     if cover_b64:
         if "," in cover_b64 and cover_b64.startswith("data:"):
             cover_b64 = cover_b64.split(",", 1)[1]
