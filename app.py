@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import base64
 import html
 import http.client
 import json
@@ -26,17 +27,20 @@ BASE = Path(__file__).resolve().parent
 DATA_ROOT = Path(os.environ.get("DATA_DIR", str(BASE / "data"))).expanduser()
 STATIC_ROOT = BASE / "static"
 SEED_LIBRARY_FILE = BASE / "data" / "creator_online_library.json"
-MANUAL_LIBRARY_FILE = BASE / "data" / "manual_creator_scripts.json"
+SEED_MANUAL_LIBRARY_FILE = BASE / "data" / "manual_creator_scripts.json"
 LIBRARY_FILE = DATA_ROOT / "creator_online_library.json"
+MANUAL_LIBRARY_FILE = DATA_ROOT / "manual_creator_scripts.json"
 SUBMISSIONS_FILE = DATA_ROOT / "creator_submissions.json"
 INTAKE_FILE = DATA_ROOT / "creator_intake_submissions.json"
 CREATORS_FILE = DATA_ROOT / "creator_profiles.json"
 THUMB_CACHE_FILE = DATA_ROOT / "creator_thumbnail_cache.json"
 VIDEO_SOURCE_CACHE_FILE = DATA_ROOT / "creator_video_source_cache.json"
 SCRIPT_HTML_CACHE_DIR = DATA_ROOT / "creator_script_html_cache"
+MANUAL_SCRIPT_ASSET_DIR = DATA_ROOT / "manual_scripts"
 SYNC_META_FILE = DATA_ROOT / "creator_sync_meta.json"
 OVERRIDES_FILE = DATA_ROOT / "creator_script_overrides.json"
 SOURCE_URL = os.environ.get("CREATOR_LIBRARY_SOURCE_URL", "https://koko-kwai-coach.onrender.com/api/library")
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://koko-fpml.onrender.com").rstrip("/")
 SYNC_INTERVAL_SEC = int(os.environ.get("CREATOR_LIBRARY_SYNC_INTERVAL_SEC", "86400"))
 ADMIN_PASSWORD = os.environ.get("KOKO_CREATOR_ADMIN_PASSWORD", "koko")
 ADMIN_COOKIE = "koko_creator_admin"
@@ -222,10 +226,71 @@ def sync_library(force: bool = False) -> dict[str, Any]:
         return meta
 
 
+def upsert_manual_entry(entry: dict[str, Any]) -> None:
+    entries = read_json_file(MANUAL_LIBRARY_FILE, [])
+    if not isinstance(entries, list):
+        entries = []
+    entry_id = str(entry.get("entry_id") or "").strip()
+    entries = [item for item in entries if isinstance(item, dict) and str(item.get("entry_id") or "") != entry_id]
+    entries.insert(0, entry)
+    write_json_atomic(MANUAL_LIBRARY_FILE, entries[:500])
+
+
+def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
+    entry = payload.get("entry") if isinstance(payload.get("entry"), dict) else {}
+    entry_id = str(entry.get("entry_id") or payload.get("entry_id") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", entry_id):
+        raise ValueError("Invalid script id.")
+    html_content = str(payload.get("html_content") or "").strip()
+    if not html_content:
+        raise ValueError("Missing script HTML content.")
+    script_json = payload.get("script_json") if isinstance(payload.get("script_json"), dict) else {}
+    static_dir = MANUAL_SCRIPT_ASSET_DIR / entry_id
+    static_dir.mkdir(parents=True, exist_ok=True)
+    html_path = static_dir / "script_table_pt.html"
+    html_path.write_text(html_content, "utf-8")
+    if script_json:
+        write_json_atomic(static_dir / "script_table_pt.json", script_json)
+    preview_url = ""
+    cover_b64 = str(payload.get("cover_b64") or "").strip()
+    if cover_b64:
+        if "," in cover_b64 and cover_b64.startswith("data:"):
+            cover_b64 = cover_b64.split(",", 1)[1]
+        cover_mime = str(payload.get("cover_mime") or "image/png")
+        suffix = ".jpg" if "jpeg" in cover_mime or "jpg" in cover_mime else ".png"
+        cover_path = static_dir / ("storyboard_cover" + suffix)
+        cover_path.write_bytes(base64.b64decode(cover_b64))
+        preview_url = f"{PUBLIC_BASE_URL}/manual_scripts/{entry_id}/{cover_path.name}"
+    imported = {
+        "entry_id": entry_id,
+        "parent_job_id": str(entry.get("parent_job_id") or f"creator_import_{entry_id}"),
+        "created_at": str(entry.get("created_at") or now_iso()),
+        "saved_at": str(entry.get("saved_at") or now_iso()),
+        "video_url": str(entry.get("video_url") or payload.get("video_url") or ""),
+        "title": str(entry.get("title") or script_json.get("title") or "Roteiro importado"),
+        "content_type": str(entry.get("content_type") or DEFAULT_CONTENT_TYPE),
+        "content_type_source": str(entry.get("content_type_source") or "manual"),
+        "content_type_reasoning": str(entry.get("content_type_reasoning") or "Imported from Creator admin Excel."),
+        "content_type_confidence": str(entry.get("content_type_confidence") or "high"),
+        "whole_video_summary": str(entry.get("whole_video_summary") or script_json.get("whole_video_summary") or ""),
+        "html_url": f"{PUBLIC_BASE_URL}/manual_scripts/{entry_id}/script_table_pt.html",
+        "pt_html_url": f"{PUBLIC_BASE_URL}/manual_scripts/{entry_id}/script_table_pt.html",
+        "zh_html_url": f"{PUBLIC_BASE_URL}/manual_scripts/{entry_id}/script_table_pt.html",
+        "preview_image_url": preview_url,
+        "source": "creator_direct_import",
+    }
+    upsert_manual_entry(imported)
+    invalidate_entry_cache(entry_id)
+    return {"ok": True, "entry": public_admin_entry(imported), "share_url": f"/script/{entry_id}"}
+
+
 def load_entries_raw() -> list[dict[str, Any]]:
     sync_library(False)
     manual = read_json_file(MANUAL_LIBRARY_FILE, [])
     manual_entries = [entry for entry in manual if isinstance(entry, dict)] if isinstance(manual, list) else []
+    seed_manual = read_json_file(SEED_MANUAL_LIBRARY_FILE, [])
+    if isinstance(seed_manual, list):
+        manual_entries.extend(entry for entry in seed_manual if isinstance(entry, dict))
     data = read_json_file(LIBRARY_FILE, [])
     if not data and SEED_LIBRARY_FILE.exists():
         data = read_json_file(SEED_LIBRARY_FILE, [])
@@ -377,6 +442,14 @@ def local_static_file_from_url(url: str) -> Path | None:
         return None
     parsed = urllib.parse.urlparse(text)
     path = parsed.path if parsed.scheme else text
+    if path.startswith("/manual_scripts/"):
+        candidate = (MANUAL_SCRIPT_ASSET_DIR / urllib.parse.unquote(path.removeprefix("/manual_scripts/"))).resolve()
+        try:
+            if MANUAL_SCRIPT_ASSET_DIR.resolve() in candidate.parents and candidate.is_file():
+                return candidate
+        except Exception:
+            return None
+        return None
     if not path.startswith("/static/"):
         return None
     candidate = (STATIC_ROOT / urllib.parse.unquote(path.removeprefix("/static/"))).resolve()
@@ -1173,6 +1246,21 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(raw)
             return
+        if parsed.path.startswith("/manual_scripts/"):
+            name = urllib.parse.unquote(parsed.path.removeprefix("/manual_scripts/"))
+            path = (MANUAL_SCRIPT_ASSET_DIR / name).resolve()
+            if MANUAL_SCRIPT_ASSET_DIR.resolve() not in path.parents or not path.is_file():
+                self.send_error(404)
+                return
+            raw = path.read_bytes()
+            content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         if parsed.path in {"/", "/creator-portal"}:
             self.send_html(page_html())
             return
@@ -1350,6 +1438,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(raw_ids, list):
                     raise ValueError("entry_ids must be a list.")
                 self.send_json({"ok": True, **delete_admin_entries([str(item or "") for item in raw_ids])})
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+            return
+        if parsed.path == "/api/admin/scripts/import":
+            if not self.require_admin():
+                return
+            try:
+                self.send_json(save_direct_import(self.read_body()), status=201)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
             return
