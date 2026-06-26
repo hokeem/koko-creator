@@ -261,6 +261,18 @@ def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         cover_path = static_dir / ("storyboard_cover" + suffix)
         cover_path.write_bytes(base64.b64decode(cover_b64))
         preview_url = f"{PUBLIC_BASE_URL}/manual_scripts/{entry_id}/{cover_path.name}"
+    content_type = str(entry.get("content_type") or DEFAULT_CONTENT_TYPE)
+    content_type = {
+        "待分类": "A classificar",
+        "夫妻欺骗": "Conflito de casal",
+        "夫妻/情侣": "Casal / namorados",
+        "夫妻情感": "Casal / namorados",
+        "隐瞒反转": "Segredo e revelacao",
+        "骗局反转": "Golpe e reviravolta",
+        "整蛊恶搞": "Pegadinha",
+        "赖账/金钱冲突": "Conflito por dinheiro",
+        "偷吃/偷懒/耍小聪明": "Esperteza cotidiana",
+    }.get(content_type, content_type)
     imported = {
         "entry_id": entry_id,
         "parent_job_id": str(entry.get("parent_job_id") or f"creator_import_{entry_id}"),
@@ -268,7 +280,7 @@ def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         "saved_at": str(entry.get("saved_at") or now_iso()),
         "video_url": str(entry.get("video_url") or payload.get("video_url") or ""),
         "title": str(entry.get("title") or script_json.get("title") or "Roteiro importado"),
-        "content_type": str(entry.get("content_type") or DEFAULT_CONTENT_TYPE),
+        "content_type": content_type,
         "content_type_source": str(entry.get("content_type_source") or "manual"),
         "content_type_reasoning": str(entry.get("content_type_reasoning") or "Imported from Creator admin Excel."),
         "content_type_confidence": str(entry.get("content_type_confidence") or "high"),
