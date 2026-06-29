@@ -134,6 +134,7 @@ def apply_entry_override(entry: dict[str, Any], override: dict[str, Any] | None)
         "content_type",
         "video_url",
         "preview_image_url",
+        "storyboard_image_url",
         "thumbnail_url",
         "html_url",
         "zh_html_url",
@@ -330,6 +331,16 @@ def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         cover_path = static_dir / ("storyboard_cover" + suffix)
         cover_path.write_bytes(base64.b64decode(cover_b64))
         preview_url = f"{PUBLIC_BASE_URL}/manual_scripts/{entry_id}/{cover_path.name}"
+    storyboard_url = str(entry.get("storyboard_image_url") or payload.get("storyboard_image_url") or "").strip()
+    storyboard_b64 = str(payload.get("storyboard_b64") or "").strip()
+    if storyboard_b64:
+        if "," in storyboard_b64 and storyboard_b64.startswith("data:"):
+            storyboard_b64 = storyboard_b64.split(",", 1)[1]
+        storyboard_mime = str(payload.get("storyboard_mime") or "image/png")
+        storyboard_suffix = ".jpg" if "jpeg" in storyboard_mime or "jpg" in storyboard_mime else ".png"
+        storyboard_path = static_dir / ("storyboard_reference" + storyboard_suffix)
+        storyboard_path.write_bytes(base64.b64decode(storyboard_b64))
+        storyboard_url = f"{PUBLIC_BASE_URL}/manual_scripts/{entry_id}/{storyboard_path.name}"
     content_type = str(entry.get("content_type") or DEFAULT_CONTENT_TYPE)
     content_type = {
         "A classificar": DEFAULT_CONTENT_TYPE,
@@ -353,6 +364,7 @@ def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         "pt_html_url": f"{PUBLIC_BASE_URL}/manual_scripts/{entry_id}/script_table_pt.html",
         "zh_html_url": f"{PUBLIC_BASE_URL}/manual_scripts/{entry_id}/script_table_pt.html",
         "preview_image_url": preview_url,
+        "storyboard_image_url": storyboard_url,
         "source": "creator_direct_import",
     }
     imported = normalized_entry(imported)
@@ -486,6 +498,7 @@ def public_entry(entry: dict[str, Any], score: int) -> dict[str, Any]:
         "video_url": abs_url(entry.get("video_url"), ""),
         "html_url": abs_url(entry.get("pt_html_url") or entry.get("html_url") or entry.get("zh_html_url")),
         "preview_image_url": abs_url(entry.get("preview_image_url") or entry.get("thumbnail_url") or ""),
+        "storyboard_image_url": abs_url(entry.get("storyboard_image_url") or ""),
         "cover_url": abs_url(entry.get("preview_image_url") or entry.get("thumbnail_url") or ""),
         "thumbnail_url": f"/api/creator/thumbnail/{entry_id}.webp" if entry_id else "",
         "script_date": script_date,
@@ -857,6 +870,7 @@ def public_admin_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "content_type": str(entry.get("content_type") or DEFAULT_CONTENT_TYPE),
         "video_url": abs_url(entry.get("video_url"), ""),
         "cover_url": abs_url(entry.get("preview_image_url") or entry.get("thumbnail_url") or ""),
+        "storyboard_image_url": abs_url(entry.get("storyboard_image_url") or ""),
         "thumbnail_url": f"/api/creator/thumbnail/{entry_id}.webp" if entry_id else "",
         "html_url": abs_url(entry.get("pt_html_url") or entry.get("html_url") or entry.get("zh_html_url")),
         "zh_html_url": abs_url(entry.get("zh_html_url") or entry.get("html_url") or entry.get("pt_html_url")),
@@ -1082,6 +1096,7 @@ def update_admin_entry(entry_id: str, payload: dict[str, Any]) -> dict[str, Any]
         "content_type": "content_type",
         "video_url": "video_url",
         "cover_url": "preview_image_url",
+        "storyboard_image_url": "storyboard_image_url",
         "html_url": "html_url",
         "zh_html_url": "zh_html_url",
         "pt_html_url": "pt_html_url",
@@ -1239,7 +1254,8 @@ function shareUrl(id){{return `${{location.origin}}/script/${{id}}`}}
 async function copyText(text){{try{{if(navigator.clipboard){{await navigator.clipboard.writeText(text);return true}}}}catch(err){{}}try{{const ta=document.createElement("textarea");ta.value=text;ta.setAttribute("readonly","");ta.style.position="fixed";ta.style.top="0";ta.style.left="-9999px";document.body.appendChild(ta);ta.focus();ta.select();ta.setSelectionRange(0,ta.value.length);const ok=document.execCommand("copy");ta.remove();return ok}}catch(err){{return false}}}}
 function showShareLink(id,copied){{const url=shareUrl(id);const box=document.querySelector("#share-output");if(box){{box.classList.add("active");box.innerHTML=`<b>${{copied?(lang==="zh"?"已复制分享链接":"Link copiado"):(lang==="zh"?"分享链接":"Link de compartilhamento")}}</b><a href="${{esc(url)}}" target="_blank" rel="noopener">${{esc(url)}}</a>`;if(!copied){{const link=box.querySelector("a");const range=document.createRange();range.selectNodeContents(link);const sel=window.getSelection();sel.removeAllRanges();sel.addRange(range)}}}}}}
 function coverImage(e){{return scriptImage(e)}}
-function detailCover(e){{return `<div class="detail-cover"><img src="${{esc(coverImage(e))}}" loading="eager" alt="Storyboard"></div>`}}
+function storyboardImage(e){{return String(e.storyboard_image_url||e.storyboard_url||"").trim()}}
+function detailCover(e){{return `<div class="detail-cover"><img src="${{esc(coverImage(e))}}" loading="eager" alt="Cover"></div>`}}
 function videoPreview(e){{const url=esc(e.video_url);const img=esc(e.thumbnail_url);return `<section class="video-section"><h3 class="video-section-title">${{lang==="zh"?"看看其他人做的：":"Veja como outros criadores fizeram:"}}<span>${{lang==="zh"?"参考视频":"Referencia"}}</span></h3><div class="video-box" data-video-box="${{esc(e.entry_id)}}" data-video-src="${{url}}"><img src="${{img}}" alt="video preview"><div class="video-fallback">${{url ? (lang==="zh"?"视频预览加载中":"Carregando preview") : ""}}</div></div></section>`}}
 async function fetchVideoSource(id){{const r=await fetch(`/api/creator/video-source/${{encodeURIComponent(id)}}?_=${{Date.now()}}`);const d=await r.json();if(!r.ok)throw new Error(d.error||"video failed");return d.video_source_url||""}}
 function hydrateVideo(e){{if(!e.video_url)return;setTimeout(async()=>{{const box=document.querySelector(`[data-video-box="${{e.entry_id}}"]`);if(!box||box.querySelector("video")||box.querySelector("iframe"))return;try{{const source=await fetchVideoSource(e.entry_id);if(source){{box.innerHTML=`<video src="${{esc(source)}}" poster="${{esc(e.thumbnail_url)}}" controls playsinline preload="metadata"></video>`;return}}}}catch(err){{}}box.innerHTML=`<iframe src="${{esc(e.video_url)}}" title="video preview" loading="lazy" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" sandbox="allow-scripts allow-same-origin allow-popups allow-presentation"></iframe><div class="video-fallback">${{lang==="zh"?"如果平台禁止内嵌播放，这里可能只显示空白。":"Se a plataforma bloquear embed, o preview pode aparecer em branco."}}</div>`}},350)}}
@@ -1263,9 +1279,9 @@ function splitBrief(list){{const out=[];const seen=new Set();list.flatMap(x=>Str
 function storyFrameHtml(f,img,i){{return `<div class="story-frame">${{sketchSvg(i)}}<span>${{esc(f.time||`00:${{String(i*5).padStart(2,"0")}}`)}}</span></div>`}}
 function timeCellText(t){{const parts=String(t||"").split("-");return parts.map(x=>esc(x)).join("<br>")}}
 function storyboardGrid(segs){{return {{cols:3,rows:3}}}}
-function scriptTableRows(segs,cover){{const grid=storyboardGrid(segs);return segs.map((s,i)=>{{const sx=i%grid.cols,sy=Math.floor(i/grid.cols);return `<tr><td class="time-cell">${{timeCellText(s.time)}}</td><td><div class="shot-cell"><div class="shot-thumb" style="--cols:${{grid.cols}};--rows:${{grid.rows}};--sx:${{sx}};--sy:${{sy}}"><img src="${{esc(cover)}}" alt="Storyboard frame"></div><div class="shot-text">${{esc(s.image)}}</div></div></td><td>${{esc(s.action)}}</td><td>${{esc(s.dialogue)}}</td></tr>`}}).join("")}}
+function scriptTableRows(segs,storyboard){{const grid=storyboardGrid(segs);return segs.map((s,i)=>{{const sx=i%grid.cols,sy=Math.floor(i/grid.cols);const frame=storyboard?`<img src="${{esc(storyboard)}}" alt="Storyboard frame">`:sketchSvg(i);return `<tr><td class="time-cell">${{timeCellText(s.time)}}</td><td><div class="shot-cell"><div class="shot-thumb" style="--cols:${{grid.cols}};--rows:${{grid.rows}};--sx:${{sx}};--sy:${{sy}}">${{frame}}</div><div class="shot-text">${{esc(s.image)}}</div></div></td><td>${{esc(s.action)}}</td><td>${{esc(s.dialogue)}}</td></tr>`}}).join("")}}
 function insightSection(title,cards){{cards=uniqueCards(cards);if(!cards.length)return "";return `<section class="insight-section"><h3>${{esc(title)}}</h3><div class="insight-cards">${{cards.map(c=>`<article><b>${{esc(c.title)}}</b><p>${{esc(c.body)}}</p></article>`).join("")}}</div></section>`}}
-function cleanScriptHtml(raw,e){{const d=extractScriptData(raw,e);const fallbackPointCards=d.points.map((x,i)=>({{title:i===0?"Ponto-chave":"Ponto-chave "+(i+1),body:x}}));const fallbackAdaptCards=d.adaptable.map((x,i)=>({{title:i===0?"Plano de substituição":"Plano "+(i+1),body:x}}));const brief=[{{label:"Video original",value:d.original}},{{label:"Conteúdo principal",value:d.main}}].filter(x=>x.value);const segs=d.segments.slice(0,9);const cover=coverImage(e);return `<article class="script-html"><div class="clean-script"><section class="brief-list">${{brief.map(x=>`<div class="brief-card"><b>${{esc(x.label)}}</b><p>${{esc(x.value)}}</p></div>`).join("")}}</section>${{insightSection("Pontos-chave",d.pointCards.length?d.pointCards:fallbackPointCards)}}${{insightSection("Planos de substituição",d.adaptableCards.length?d.adaptableCards:fallbackAdaptCards)}}${{segs.length?`<section class="script-table-card"><div class="script-table-title">Tabela do roteiro</div><table class="script-table"><colgroup><col class="col-time"><col class="col-image"><col class="col-action"><col class="col-dialogue"></colgroup><thead><tr><th>Tempo</th><th>Imagem</th><th>Ações</th><th>Diálogos</th></tr></thead><tbody>${{scriptTableRows(segs,cover)}}</tbody></table></section>`:""}}</div></article>`}}
+function cleanScriptHtml(raw,e){{const d=extractScriptData(raw,e);const fallbackPointCards=d.points.map((x,i)=>({{title:i===0?"Ponto-chave":"Ponto-chave "+(i+1),body:x}}));const fallbackAdaptCards=d.adaptable.map((x,i)=>({{title:i===0?"Plano de substituição":"Plano "+(i+1),body:x}}));const brief=[{{label:"Video original",value:d.original}},{{label:"Conteúdo principal",value:d.main}}].filter(x=>x.value);const segs=d.segments.slice(0,9);const storyboard=storyboardImage(e);return `<article class="script-html"><div class="clean-script"><section class="brief-list">${{brief.map(x=>`<div class="brief-card"><b>${{esc(x.label)}}</b><p>${{esc(x.value)}}</p></div>`).join("")}}</section>${{insightSection("Pontos-chave",d.pointCards.length?d.pointCards:fallbackPointCards)}}${{insightSection("Planos de substituição",d.adaptableCards.length?d.adaptableCards:fallbackAdaptCards)}}${{segs.length?`<section class="script-table-card"><div class="script-table-title">Tabela do roteiro</div><table class="script-table"><colgroup><col class="col-time"><col class="col-image"><col class="col-action"><col class="col-dialogue"></colgroup><thead><tr><th>Tempo</th><th>Imagem</th><th>Ações</th><th>Diálogos</th></tr></thead><tbody>${{scriptTableRows(segs,storyboard)}}</tbody></table></section>`:""}}</div></article>`}}
 function renderScriptSlot(html,e){{return html?cleanScriptHtml(html,e):`<article class="script-html"><div class="clean-script"><div class="brief-card"><b>Conteúdo principal</b><p>${{esc(e.summary||"")}}</p></div></div></article>`}}
 function renderDetail(e){{const s=statusOf(e.entry_id);const liked=ids("saved").has(e.entry_id);document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><div class="detail-content">${{detailCover(e)}}<h2 class="detail-title">${{esc(ptTitle(e))}}</h2><div class="tags"><span class="tag">${{esc(ptTag(e.content_type))}}</span><span class="tag">1-3 min</span>${{s?`<span class="tag">${{esc(ptTag(s))}}</span>`:""}}</div><div class="share-box" id="share-output"></div><div id="script-html-slot">${{e.script_html?renderScriptSlot(e.script_html,e):scriptLoading()}}</div>${{videoPreview(e)}}<section class="submit"><b>${{t("submitTitle")}}</b><p class="lead">${{t("submitHint")}}</p><input type="url" data-submit-url="${{esc(e.entry_id)}}" placeholder="${{t("submitPlaceholder")}}"><button class="primary" data-submit="${{esc(e.entry_id)}}">${{t("submitButton")}}</button><div id="submit-status-${{esc(e.entry_id)}}"></div></section><div class="social-actions"><button class="social-btn" type="button" data-status="${{liked?"":"saved"}}" data-entry="${{esc(e.entry_id)}}" aria-label="${{t("save")}}">♡<span>${{liked?(lang==="zh"?"已收藏":"Salvo"):(lang==="zh"?"收藏":"Salvar")}}</span></button><button class="social-btn" type="button" data-copy-share="${{esc(e.entry_id)}}" aria-label="${{lang==="zh"?"复制分享链接":"Copiar link"}}">↗<span>${{lang==="zh"?"分享":"Compartilhar"}}</span></button></div></div>`}}
 function loadDetailHtml(e){{if(e.script_html)return;setTimeout(async()=>{{try{{const html=await fetchScriptHtml(e.entry_id);const slot=document.querySelector("#script-html-slot");if(slot)slot.innerHTML=renderScriptSlot(html,e)}}catch(err){{const slot=document.querySelector("#script-html-slot");if(slot)slot.innerHTML=renderScriptSlot("",{{...e,summary:e.summary||err.message}})}}}},300)}}
