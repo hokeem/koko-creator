@@ -341,6 +341,8 @@ def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         storyboard_path = static_dir / ("storyboard_reference" + storyboard_suffix)
         storyboard_path.write_bytes(base64.b64decode(storyboard_b64))
         storyboard_url = f"{PUBLIC_BASE_URL}/manual_scripts/{entry_id}/{storyboard_path.name}"
+    if not storyboard_url:
+        storyboard_url = preview_url
     content_type = str(entry.get("content_type") or DEFAULT_CONTENT_TYPE)
     content_type = {
         "A classificar": DEFAULT_CONTENT_TYPE,
@@ -498,7 +500,7 @@ def public_entry(entry: dict[str, Any], score: int) -> dict[str, Any]:
         "video_url": abs_url(entry.get("video_url"), ""),
         "html_url": abs_url(entry.get("pt_html_url") or entry.get("html_url") or entry.get("zh_html_url")),
         "preview_image_url": abs_url(entry.get("preview_image_url") or entry.get("thumbnail_url") or ""),
-        "storyboard_image_url": abs_url(entry.get("storyboard_image_url") or ""),
+        "storyboard_image_url": abs_url(entry.get("storyboard_image_url") or entry.get("preview_image_url") or entry.get("thumbnail_url") or ""),
         "cover_url": abs_url(entry.get("preview_image_url") or entry.get("thumbnail_url") or ""),
         "thumbnail_url": f"/api/creator/thumbnail/{entry_id}.webp" if entry_id else "",
         "script_date": script_date,
@@ -870,7 +872,7 @@ def public_admin_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "content_type": str(entry.get("content_type") or DEFAULT_CONTENT_TYPE),
         "video_url": abs_url(entry.get("video_url"), ""),
         "cover_url": abs_url(entry.get("preview_image_url") or entry.get("thumbnail_url") or ""),
-        "storyboard_image_url": abs_url(entry.get("storyboard_image_url") or ""),
+        "storyboard_image_url": abs_url(entry.get("storyboard_image_url") or entry.get("preview_image_url") or entry.get("thumbnail_url") or ""),
         "thumbnail_url": f"/api/creator/thumbnail/{entry_id}.webp" if entry_id else "",
         "html_url": abs_url(entry.get("pt_html_url") or entry.get("html_url") or entry.get("zh_html_url")),
         "zh_html_url": abs_url(entry.get("zh_html_url") or entry.get("html_url") or entry.get("pt_html_url")),
@@ -1226,7 +1228,7 @@ function saveScheduleItem(id,date){{workspace.schedule=workspace.schedule||{{}};
 function openScheduleModal(id){{scheduleDraftId=id;scheduleSelectedDate=todayKey();renderCalendar();document.querySelector("#schedule-title").textContent=lang==="zh"?"加入拍摄日历":"Adicionar ao calendario de gravacao";document.querySelector("#schedule-note").textContent=lang==="zh"?"选择你准备拍摄这个脚本的日期。":"Escolha o dia em que pretende gravar este roteiro.";document.querySelector("[data-schedule-confirm]").textContent=lang==="zh"?"加入拍摄日历":"Adicionar";document.querySelector("#schedule-modal").classList.add("active")}}
 function closeScheduleModal(){{document.querySelector("#schedule-modal").classList.remove("active");scheduleDraftId=""}}
 function renderCalendar(){{const root=document.querySelector("#calendar-grid");if(!root)return;const base=scheduleSelectedDate?new Date(`${{scheduleSelectedDate}}T00:00:00`):new Date();const first=new Date(base.getFullYear(),base.getMonth(),1);const start=new Date(first);start.setDate(first.getDate()-first.getDay());const weekdays=lang==="zh"?["日","一","二","三","四","五","六"]:["D","S","T","Q","Q","S","S"];let html=weekdays.map(w=>`<div class="calendar-weekday">${{w}}</div>`).join("");for(let i=0;i<35;i++){{const d=new Date(start);d.setDate(start.getDate()+i);const key=dayKey(d);const muted=d.getMonth()!==base.getMonth();const selected=key===scheduleSelectedDate;html+=`<button class="calendar-day ${{muted?"muted":""}} ${{selected?"selected":""}}" type="button" data-schedule-date="${{key}}">${{d.getDate()}}</button>`}}root.innerHTML=html}}
-function scriptImage(e){{return String(e.preview_image_url||e.cover_url||e.thumbnail_url||storyboardDemoUrl||"").trim()}}
+function scriptImage(e){{return String(e.preview_image_url||e.cover_url||e.thumbnail_url||"").trim()}}
 function scheduleItem(e,date){{return `<button class="schedule-item" type="button" data-detail="${{esc(e.entry_id)}}"><img src="${{esc(scriptImage(e))}}" loading="lazy" alt=""><div><h3>${{esc(e.title)}}</h3><p>${{esc(e.content_type||"")}} · ${{esc(scheduleLabel(date))}}</p></div></button>`}}
 function monthTitle(date){{return lang==="zh"?`${{date.getFullYear()}}年${{date.getMonth()+1}}月`:date.toLocaleDateString("pt-BR",{{month:"long",year:"numeric"}})}}
 function shiftScheduleMonth(delta){{const base=new Date(`${{scheduleViewDate||todayKey()}}T00:00:00`);base.setMonth(base.getMonth()+delta);scheduleViewDate=dayKey(base);renderScheduleFeed()}}
@@ -1279,7 +1281,7 @@ function splitBrief(list){{const out=[];const seen=new Set();list.flatMap(x=>Str
 function storyFrameHtml(f,img,i){{return `<div class="story-frame">${{sketchSvg(i)}}<span>${{esc(f.time||`00:${{String(i*5).padStart(2,"0")}}`)}}</span></div>`}}
 function timeCellText(t){{const parts=String(t||"").split("-");return parts.map(x=>esc(x)).join("<br>")}}
 function storyboardGrid(segs){{return {{cols:3,rows:3}}}}
-function scriptTableRows(segs,storyboard){{const grid=storyboardGrid(segs);return segs.map((s,i)=>{{const sx=i%grid.cols,sy=Math.floor(i/grid.cols);const frame=storyboard?`<img src="${{esc(storyboard)}}" alt="Storyboard frame">`:sketchSvg(i);return `<tr><td class="time-cell">${{timeCellText(s.time)}}</td><td><div class="shot-cell"><div class="shot-thumb" style="--cols:${{grid.cols}};--rows:${{grid.rows}};--sx:${{sx}};--sy:${{sy}}">${{frame}}</div><div class="shot-text">${{esc(s.image)}}</div></div></td><td>${{esc(s.action)}}</td><td>${{esc(s.dialogue)}}</td></tr>`}}).join("")}}
+function scriptTableRows(segs,storyboard){{const grid=storyboardGrid(segs);return segs.map((s,i)=>{{const sx=i%grid.cols,sy=Math.floor(i/grid.cols);const frame=storyboard?`<img src="${{esc(storyboard)}}" alt="Storyboard frame">`:"";return `<tr><td class="time-cell">${{timeCellText(s.time)}}</td><td><div class="shot-cell"><div class="shot-thumb" style="--cols:${{grid.cols}};--rows:${{grid.rows}};--sx:${{sx}};--sy:${{sy}}">${{frame}}</div><div class="shot-text">${{esc(s.image)}}</div></div></td><td>${{esc(s.action)}}</td><td>${{esc(s.dialogue)}}</td></tr>`}}).join("")}}
 function insightSection(title,cards){{cards=uniqueCards(cards);if(!cards.length)return "";return `<section class="insight-section"><h3>${{esc(title)}}</h3><div class="insight-cards">${{cards.map(c=>`<article><b>${{esc(c.title)}}</b><p>${{esc(c.body)}}</p></article>`).join("")}}</div></section>`}}
 function cleanScriptHtml(raw,e){{const d=extractScriptData(raw,e);const fallbackPointCards=d.points.map((x,i)=>({{title:i===0?"Ponto-chave":"Ponto-chave "+(i+1),body:x}}));const fallbackAdaptCards=d.adaptable.map((x,i)=>({{title:i===0?"Plano de substituição":"Plano "+(i+1),body:x}}));const brief=[{{label:"Video original",value:d.original}},{{label:"Conteúdo principal",value:d.main}}].filter(x=>x.value);const segs=d.segments.slice(0,9);const storyboard=storyboardImage(e);return `<article class="script-html"><div class="clean-script"><section class="brief-list">${{brief.map(x=>`<div class="brief-card"><b>${{esc(x.label)}}</b><p>${{esc(x.value)}}</p></div>`).join("")}}</section>${{insightSection("Pontos-chave",d.pointCards.length?d.pointCards:fallbackPointCards)}}${{insightSection("Planos de substituição",d.adaptableCards.length?d.adaptableCards:fallbackAdaptCards)}}${{segs.length?`<section class="script-table-card"><div class="script-table-title">Tabela do roteiro</div><table class="script-table"><colgroup><col class="col-time"><col class="col-image"><col class="col-action"><col class="col-dialogue"></colgroup><thead><tr><th>Tempo</th><th>Imagem</th><th>Ações</th><th>Diálogos</th></tr></thead><tbody>${{scriptTableRows(segs,storyboard)}}</tbody></table></section>`:""}}</div></article>`}}
 function renderScriptSlot(html,e){{return html?cleanScriptHtml(html,e):`<article class="script-html"><div class="clean-script"><div class="brief-card"><b>Conteúdo principal</b><p>${{esc(e.summary||"")}}</p></div></div></article>`}}
