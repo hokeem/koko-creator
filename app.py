@@ -498,13 +498,14 @@ COUPLE_TERMS = [
 ]
 FAMILY_TERMS = ["妈妈", "爸爸", "儿子", "女儿", "家庭", "亲戚", "mãe", "mae", "pai", "filho", "filha", "familia", "família"]
 FRIEND_TERMS = ["朋友", "同事", "兄弟", "闺蜜", "amigo", "amiga", "colega", "irmão", "irmao", "irmã", "irma"]
-GROUP_TERMS = ["多人", "围观", "群体", "路人", "pessoas", "grupo", "plateia", "publico", "público", "multidao", "multidão", "rua"]
+GROUP_TERMS = ["多人", "围观", "群体", "路人", "儿童", "孩子", "pessoas", "grupo", "plateia", "publico", "público", "multidao", "multidão", "rua", "criança", "crianca", "crianças", "criancas"]
 SERVICE_TERMS = ["老板", "员工", "顾客", "服务", "客户", "chefe", "cliente", "funcionario", "funcionário", "atendimento", "entregador", "delivery"]
 MONEY_TERMS = ["付款", "欠钱", "逃单", "工资", "dinheiro", "pagar", "pagamento", "salario", "salário", "reais", "conta", "cobrar"]
 PRANK_TERMS = ["整蛊", "恶作剧", "捉弄", "pegadinha", "brincadeira", "susto", "troll", "zoeira"]
 MULTI_PERSON_TERMS = [
     "两个人", "两位", "二人", "男人和女人", "男孩和男人", "女孩和女人", "duas pessoas", "dois homens", "duas mulheres",
     "homem e mulher", "homem e uma mulher", "mulher e um homem", "menino e homem", "menino e um homem", "menina e mulher", "casal de amigos",
+    "homem se aproxima", "um homem se aproxima", "mulher se aproxima", "uma mulher se aproxima", "homem se aproxima dela", "mulher se aproxima dele",
 ]
 
 
