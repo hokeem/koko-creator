@@ -590,11 +590,7 @@ def entry_matches_hard_selection(entry: dict[str, Any], selected: list[str]) -> 
         if humor == "group_misunderstanding" and not (sig["group"] or sig["friend"] or sig["family"]):
             return False
 
-    if humor == "prank" and not sig["prank"]:
-        return False
     if humor == "money" and not (sig["money"] or sig["service"]):
-        return False
-    if humor == "sneaky" and not sig["sneaky"]:
         return False
     if humor == "relationship" and not sig["couple"]:
         return False
