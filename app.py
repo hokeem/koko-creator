@@ -82,7 +82,7 @@ QUESTIONS = [
         "options": [
             {"id": "banter", "pt": "Discussão e respostas rápidas", "zh": "拌嘴互怼", "people": ["duo"], "scenes": ["duo_couple"], "types": ["夫妻吵架", "妻管严", "夫妻算计"], "keywords": ["吵架", "争执", "训斥", "反驳", "打脸"]},
             {"id": "twist", "pt": "Segredo e revelação", "zh": "隐瞒反转", "people": ["solo", "duo", "group"], "types": ["夫妻欺骗", "骗子", "夫妻算计"], "keywords": ["假装", "隐瞒", "谎称", "秘密", "真相", "发现"]},
-            {"id": "prank", "pt": "Pegadinha ou susto", "zh": "整蛊恶搞", "people": ["solo", "duo", "group"], "scenes": ["solo_reaction", "duo_friends", "duo_service", "group_friends", "group_public"], "types": ["整蛊", "夫妻整蛊"], "keywords": ["整蛊", "恶作剧", "捉弄", "陷阱", "反应"]},
+            {"id": "prank", "pt": "Pegadinha ou susto", "zh": "整蛊恶搞", "people": ["solo", "duo", "group"], "scenes": ["solo_reaction", "duo_friends", "duo_service", "group_friends", "group_public"], "types": ["整蛊"], "keywords": ["整蛊", "恶作剧", "捉弄", "陷阱", "反应"]},
             {"id": "money", "pt": "Dinheiro ou vantagem", "zh": "钱/占便宜", "people": ["duo", "group"], "scenes": ["duo_service", "duo_friends", "group_public", "group_friends"], "types": ["赖账", "骗子", "夫妻算计"], "keywords": ["付款", "欠钱", "逃单", "结账", "便宜"]},
             {"id": "sneaky", "pt": "Preguiça ou esperteza", "zh": "偷懒/偷吃/耍小聪明", "people": ["solo", "duo", "group"], "types": ["偷吃东西", "偷奸耍滑"], "keywords": ["偷吃", "偷喝", "偷懒", "装病", "耍小聪明"]},
             {"id": "relationship", "pt": "Ciúmes / conflito de casal", "zh": "吃醋/亲密关系冲突", "people": ["duo"], "scenes": ["duo_couple"], "types": ["夫妻欺骗", "夫妻吵架", "夫妻出轨", "夫妻算计"], "keywords": ["吃醋", "出轨", "约会", "女友", "男友", "隐瞒", "吵架", "关系"]},
@@ -476,6 +476,135 @@ def option_lookup() -> dict[str, dict[str, Any]]:
     return {str(option["id"]): option for question in QUESTIONS for option in question.get("options", [])}
 
 
+PEOPLE_OPTIONS = {"solo", "duo", "group"}
+SCENE_OPTIONS = {
+    "solo_reaction",
+    "solo_smart",
+    "duo_couple",
+    "duo_friends",
+    "duo_service",
+    "group_family",
+    "group_friends",
+    "group_public",
+}
+HUMOR_OPTIONS = {"banter", "twist", "prank", "money", "sneaky", "relationship", "group_misunderstanding", "hot"}
+COUPLE_TYPES = {"夫妻吵架", "夫妻欺骗", "夫妻算计", "妻管严", "夫妻出轨", "夫妻整蛊", "夫妻关系", "夫妻/情侣"}
+MONEY_TYPES = {"赖账", "赖账/金钱冲突"}
+SNEAKY_TYPES = {"偷吃东西", "偷奸耍滑", "偷吃/偷懒/耍小聪明"}
+PRANK_TYPES = {"整蛊", "整蛊恶搞"}
+COUPLE_TERMS = [
+    "夫妻", "妻子", "丈夫", "老公", "老婆", "情侣", "男友", "女友", "出轨", "吃醋",
+    "marido", "esposa", "casal", "namorado", "namorada", "noivo", "noiva", "ciume", "ciúme", "traicao", "traição", "infiel", "amante",
+]
+FAMILY_TERMS = ["妈妈", "爸爸", "儿子", "女儿", "家庭", "亲戚", "mãe", "mae", "pai", "filho", "filha", "familia", "família"]
+FRIEND_TERMS = ["朋友", "同事", "兄弟", "闺蜜", "amigo", "amiga", "colega", "irmão", "irmao", "irmã", "irma"]
+GROUP_TERMS = ["多人", "围观", "群体", "路人", "pessoas", "grupo", "plateia", "publico", "público", "multidao", "multidão", "rua"]
+SERVICE_TERMS = ["老板", "员工", "顾客", "服务", "客户", "chefe", "cliente", "funcionario", "funcionário", "atendimento", "entregador", "delivery"]
+MONEY_TERMS = ["付款", "欠钱", "逃单", "工资", "dinheiro", "pagar", "pagamento", "salario", "salário", "reais", "conta", "cobrar"]
+PRANK_TERMS = ["整蛊", "恶作剧", "捉弄", "pegadinha", "brincadeira", "susto", "troll", "zoeira"]
+MULTI_PERSON_TERMS = [
+    "两个人", "两位", "二人", "男人和女人", "男孩和男人", "女孩和女人", "duas pessoas", "dois homens", "duas mulheres",
+    "homem e mulher", "homem e uma mulher", "mulher e um homem", "menino e homem", "menino e um homem", "menina e mulher", "casal de amigos",
+]
+
+
+def entry_match_text(entry: dict[str, Any]) -> str:
+    item = normalized_entry(entry)
+    return " ".join(
+        str(item.get(key) or "")
+        for key in ["content_type", "title", "whole_video_summary", "summary", "content_type_reasoning", "video_url"]
+    ).lower()
+
+
+def has_any(text: str, terms: list[str] | set[str]) -> bool:
+    return any(str(term).lower() in text for term in terms if term)
+
+
+def selected_axis(selected: list[str], options: set[str]) -> str:
+    return next((value for value in selected if value in options), "")
+
+
+def entry_signals(entry: dict[str, Any]) -> dict[str, bool]:
+    item = normalized_entry(entry)
+    text = entry_match_text(item)
+    content_type = str(item.get("content_type") or DEFAULT_CONTENT_TYPE)
+    couple = content_type in COUPLE_TYPES or has_any(text, COUPLE_TERMS)
+    family = has_any(text, FAMILY_TERMS)
+    friend = has_any(text, FRIEND_TERMS)
+    group = has_any(text, GROUP_TERMS)
+    multi = has_any(text, MULTI_PERSON_TERMS)
+    service = has_any(text, SERVICE_TERMS)
+    money = content_type in MONEY_TYPES or has_any(text, MONEY_TERMS)
+    prank = content_type in PRANK_TYPES or has_any(text, PRANK_TERMS)
+    sneaky = content_type in SNEAKY_TYPES
+    return {
+        "couple": couple,
+        "family": family,
+        "friend": friend,
+        "group": group,
+        "multi": multi,
+        "service": service,
+        "money": money,
+        "prank": prank,
+        "sneaky": sneaky,
+    }
+
+
+def entry_matches_hard_selection(entry: dict[str, Any], selected: list[str]) -> bool:
+    people = selected_axis(selected, PEOPLE_OPTIONS)
+    scene = selected_axis(selected, SCENE_OPTIONS)
+    humor = selected_axis(selected, HUMOR_OPTIONS)
+    sig = entry_signals(entry)
+
+    if people == "solo" or scene in {"solo_reaction", "solo_smart"}:
+        if sig["couple"] or sig["family"] or sig["friend"] or sig["service"] or sig["group"] or sig["multi"]:
+            return False
+    elif people == "duo":
+        if scene == "duo_couple" or humor in {"banter", "relationship"}:
+            if not sig["couple"]:
+                return False
+        elif scene == "duo_friends":
+            if sig["couple"] or sig["family"] or sig["service"] or sig["group"]:
+                return False
+        elif scene == "duo_service":
+            if sig["couple"] or sig["family"] or sig["friend"] or sig["group"]:
+                return False
+            if not (sig["service"] or sig["money"]):
+                return False
+        elif sig["family"] or sig["group"]:
+            return False
+    elif people == "group":
+        if scene == "group_family" and not sig["family"]:
+            return False
+        if scene == "group_friends" and sig["couple"]:
+            return False
+        if scene == "group_public" and sig["couple"] and not (sig["group"] or sig["service"] or sig["money"]):
+            return False
+        if humor == "group_misunderstanding" and not (sig["group"] or sig["friend"] or sig["family"]):
+            return False
+
+    if humor == "money" and not (sig["money"] or sig["service"]):
+        return False
+    if humor == "relationship" and not sig["couple"]:
+        return False
+    if humor == "banter" and people != "solo" and not sig["couple"]:
+        return False
+    return True
+
+
+def filtered_entries_for_selection(entries: list[dict[str, Any]], selected: list[str]) -> list[dict[str, Any]]:
+    if not selected:
+        return entries
+    filtered = [entry for entry in entries if entry_matches_hard_selection(entry, selected)]
+    if filtered:
+        return filtered
+    people = selected_axis(selected, PEOPLE_OPTIONS)
+    scene = selected_axis(selected, SCENE_OPTIONS)
+    if people == "solo" or scene in {"solo_reaction", "solo_smart"}:
+        return [entry for entry in entries if not entry_signals(entry)["couple"]]
+    return entries
+
+
 def score_entry(entry: dict[str, Any], selected: list[str], index: int) -> int:
     lookup = option_lookup()
     text = " ".join([
@@ -616,7 +745,8 @@ def recommendation_payload(selected: list[str], limit: int = 80) -> dict[str, An
             "total": len(entries),
             "entries": [public_entry(entry, score_entry(entry, selected, idx)) for idx, entry in enumerate(entries[:limit])],
         }
-    scored = sorted(((score_entry(entry, selected, idx), entry) for idx, entry in enumerate(entries)), key=lambda pair: pair[0], reverse=True)
+    candidates = filtered_entries_for_selection(entries, selected)
+    scored = sorted(((score_entry(entry, selected, idx), entry) for idx, entry in enumerate(candidates)), key=lambda pair: pair[0], reverse=True)
     return {"questions": QUESTIONS, "selected": selected, "total": len(scored), "entries": [public_entry(entry, score) for score, entry in scored[:limit]]}
 
 
