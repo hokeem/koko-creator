@@ -415,7 +415,25 @@ def load_entries() -> list[dict[str, Any]]:
     return entries
 
 
-def load_admin_entries() -> list[dict[str, Any]]:
+def entry_is_effective(entry: dict[str, Any]) -> bool:
+    return bool(
+        str(entry.get("title") or "").strip()
+        and entry_summary(entry)
+        and entry_script_url(entry)
+    )
+
+
+def admin_entry_scope(entry: dict[str, Any]) -> str:
+    if not bool(entry.get("creator_published", True)):
+        return "hidden"
+    if not entry_is_effective(entry):
+        return "incomplete"
+    return "portal_visible"
+
+
+def load_admin_entries(scope: str = "portal_visible") -> list[dict[str, Any]]:
+    if scope not in {"portal_visible", "hidden", "incomplete", "all"}:
+        scope = "portal_visible"
     overrides = load_overrides()
     entries: list[dict[str, Any]] = []
     for entry in load_entries_raw():
@@ -423,16 +441,17 @@ def load_admin_entries() -> list[dict[str, Any]]:
         override = overrides.get(entry_id)
         if isinstance(override, dict) and override.get("deleted"):
             continue
-        entries.append(normalized_entry(apply_entry_override(entry, override)))
+        normalized = normalized_entry(apply_entry_override(entry, override))
+        if scope != "all" and admin_entry_scope(normalized) != scope:
+            continue
+        entries.append(normalized)
     return sorted(entries, key=lambda item: str(item.get("saved_at") or item.get("created_at") or ""), reverse=True)
 
 
 def effective_entries() -> list[dict[str, Any]]:
     entries = [
         entry for entry in load_entries()
-        if str(entry.get("title") or "").strip()
-        and entry_summary(entry)
-        and entry_script_url(entry)
+        if entry_is_effective(entry)
     ]
     return sorted(entries, key=lambda item: str(item.get("saved_at") or item.get("created_at") or ""), reverse=True)
 
@@ -609,7 +628,7 @@ def entry_by_id(entry_id: str) -> dict[str, Any] | None:
 
 
 def admin_entry_by_id(entry_id: str) -> dict[str, Any] | None:
-    for entry in load_admin_entries():
+    for entry in load_admin_entries("all"):
         if str(entry.get("entry_id") or "") == entry_id:
             return entry
     return None
@@ -1238,8 +1257,8 @@ function saveScheduleItem(id,date){{workspace.schedule=workspace.schedule||{{}};
 function openScheduleModal(id){{scheduleDraftId=id;scheduleSelectedDate=todayKey();renderCalendar();document.querySelector("#schedule-title").textContent=lang==="zh"?"加入拍摄日历":"Adicionar ao calendario de gravacao";document.querySelector("#schedule-note").textContent=lang==="zh"?"选择你准备拍摄这个脚本的日期。":"Escolha o dia em que pretende gravar este roteiro.";document.querySelector("[data-schedule-confirm]").textContent=lang==="zh"?"加入拍摄日历":"Adicionar";document.querySelector("#schedule-modal").classList.add("active")}}
 function closeScheduleModal(){{document.querySelector("#schedule-modal").classList.remove("active");scheduleDraftId=""}}
 function renderCalendar(){{const root=document.querySelector("#calendar-grid");if(!root)return;const base=scheduleSelectedDate?new Date(`${{scheduleSelectedDate}}T00:00:00`):new Date();const first=new Date(base.getFullYear(),base.getMonth(),1);const start=new Date(first);start.setDate(first.getDate()-first.getDay());const weekdays=lang==="zh"?["日","一","二","三","四","五","六"]:["D","S","T","Q","Q","S","S"];let html=weekdays.map(w=>`<div class="calendar-weekday">${{w}}</div>`).join("");for(let i=0;i<35;i++){{const d=new Date(start);d.setDate(start.getDate()+i);const key=dayKey(d);const muted=d.getMonth()!==base.getMonth();const selected=key===scheduleSelectedDate;html+=`<button class="calendar-day ${{muted?"muted":""}} ${{selected?"selected":""}}" type="button" data-schedule-date="${{key}}">${{d.getDate()}}</button>`}}root.innerHTML=html}}
-function scriptImage(e){{return String(e.preview_image_url||e.cover_url||e.thumbnail_url||"").trim()}}
-function scheduleItem(e,date){{return `<button class="schedule-item" type="button" data-detail="${{esc(e.entry_id)}}"><img src="${{esc(scriptImage(e))}}" loading="lazy" alt=""><div><h3>${{esc(e.title)}}</h3><p>${{esc(e.content_type||"")}} · ${{esc(scheduleLabel(date))}}</p></div></button>`}}
+function scriptImage(e){{return String(e.preview_image_url||e.cover_url||e.thumbnail_url||storyboardDemoUrl||"").trim()}}
+function scheduleItem(e,date){{return `<button class="schedule-item" type="button" data-detail="${{esc(e.entry_id)}}"><img src="${{esc(scriptImage(e))}}" loading="lazy" alt=""><div><h3>${{esc(e.title)}}</h3><p>${{esc(ptTag(e.content_type||""))}} · ${{esc(scheduleLabel(date))}}</p></div></button>`}}
 function monthTitle(date){{return lang==="zh"?`${{date.getFullYear()}}年${{date.getMonth()+1}}月`:date.toLocaleDateString("pt-BR",{{month:"long",year:"numeric"}})}}
 function shiftScheduleMonth(delta){{const base=new Date(`${{scheduleViewDate||todayKey()}}T00:00:00`);base.setMonth(base.getMonth()+delta);scheduleViewDate=dayKey(base);renderScheduleFeed()}}
 function renderShootCalendar(schedule){{const base=scheduleViewDate?new Date(`${{scheduleViewDate}}T00:00:00`):new Date();const first=new Date(base.getFullYear(),base.getMonth(),1);const start=new Date(first);start.setDate(first.getDate()-first.getDay());const weekdays=lang==="zh"?["日","一","二","三","四","五","六"]:["D","S","T","Q","Q","S","S"];let cells=weekdays.map(w=>`<div class="shoot-weekday">${{w}}</div>`).join("");for(let i=0;i<42;i++){{const d=new Date(start);d.setDate(start.getDate()+i);const key=dayKey(d);const count=(schedule[key]||[]).length;const outside=d.getMonth()!==base.getMonth();const active=key===scheduleViewDate;cells+=`<button class="shoot-day ${{outside?"outside":""}} ${{active?"active":""}} ${{count?"has-items":""}}" type="button" data-shoot-date="${{key}}"><span>${{d.getDate()}}</span>${{count?`<i class="shoot-dot">${{count}}</i>`:""}}</button>`}}return `<section class="shoot-calendar-panel"><div class="shoot-calendar-head"><button class="shoot-month-btn" type="button" data-shoot-month="-1">‹</button><div class="shoot-month-title"><b>${{esc(monthTitle(base))}}</b><span>${{lang==="zh"?"选择日期查看待拍脚本":"Toque em um dia para ver tarefas"}}</span></div><button class="shoot-month-btn" type="button" data-shoot-month="1">›</button></div><div class="shoot-grid">${{cells}}</div></section>`}}
@@ -1274,7 +1293,7 @@ function hydrateVideo(e){{if(!e.video_url)return;setTimeout(async()=>{{const box
 function scriptLoading(){{return `<section class="script-loading"><b>${{lang==="zh"?"脚本加载中请耐心等待":"Roteiro carregando, aguarde um momento"}}</b><span>${{lang==="zh"?"正在整理完整脚本内容，加载完成后会自动显示。":"Estamos preparando o roteiro completo. Ele aparecerá automaticamente."}}</span><div class="script-progress" aria-hidden="true"></div></section>`}}
 function normalizeLabel(s){{return String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[：:]/g,"").trim()}}
 function compactText(s){{return String(s||"").replace(/\s+/g," ").trim()}}
-function ptTag(value){{const raw=String(value||"").trim();const key=raw.toLowerCase();const map={{"待分类":"A classificar","热门":"Popular","夫妻欺骗":"Conflito de casal","夫妻/情侣":"Casal / namorados","夫妻情感":"Casal / namorados","夫妻吵架":"Discussão de casal","夫妻出轨":"Traição de casal","夫妻算计":"Plano de casal","妻管严":"Controle no casal","夫妻整蛊":"Pegadinha de casal","隐瞒反转":"Segredo e revelação","骗局反转":"Golpe e reviravolta","整蛊恶搞":"Pegadinha","整蛊":"Pegadinha","赖账/金钱冲突":"Conflito por dinheiro","赖账":"Conflito por dinheiro","偷吃/偷懒/耍小聪明":"Esperteza cotidiana","偷奸耍滑":"Esperteza cotidiana","骗子":"Golpe","撬墙角":"Triângulo amoroso","偷吃东西":"Comer escondido",saved:"Salvo",planned:"Planejado",finished:"Gravado"}};return map[raw]||map[key]||raw.replace(/_/g," ")}}
+function ptTag(value){{const raw=String(value||"").trim();const key=raw.toLowerCase();const map={{"待分类":"A classificar","热门":"Popular","还没想好，给我热门":"Popular","夫妻关系":"Relacionamento de casal","夫妻欺骗":"Conflito de casal","夫妻/情侣":"Casal / namorados","夫妻情感":"Casal / namorados","夫妻吵架":"Discussão de casal","夫妻出轨":"Traição de casal","夫妻算计":"Plano de casal","妻管严":"Controle no casal","夫妻整蛊":"Pegadinha de casal","隐瞒反转":"Segredo e revelação","骗局反转":"Golpe e reviravolta","整蛊恶搞":"Pegadinha","整蛊":"Pegadinha","赖账/金钱冲突":"Conflito por dinheiro","赖账":"Conflito por dinheiro","偷吃/偷懒/耍小聪明":"Esperteza cotidiana","偷奸耍滑":"Esperteza cotidiana","骗子":"Golpe","撬墙角":"Triângulo amoroso","偷吃东西":"Comer escondido","Relacionamento de casal":"Relacionamento de casal","Conflito por dinheiro":"Conflito por dinheiro","Pegadinha":"Pegadinha","Golpe e reviravolta":"Golpe e reviravolta","Esperteza cotidiana":"Esperteza cotidiana","Popular":"Popular",saved:"Salvo",planned:"Planejado",finished:"Gravado"}};return map[raw]||map[key]||raw.replace(/_/g," ")}}
 const storyboardDemoUrl="/static/storyboard_sick_wife_demo.png";
 function hasChinese(s){{return /[\u4e00-\u9fff]/.test(String(s||""))}}
 function collapseRepeatedText(s){{let text=compactText(s);if(!text)return "";for(let parts=2;parts<=4;parts++){{if(text.length%parts)continue;const size=text.length/parts;const chunk=text.slice(0,size).trim();if(chunk&&Array.from({{length:parts}},(_,i)=>text.slice(i*size,(i+1)*size).trim()).every(x=>x===chunk))return chunk}}const words=text.split(/\s+/);for(let parts=2;parts<=4;parts++){{if(words.length%parts)continue;const size=words.length/parts;const chunk=words.slice(0,size).join(" ");let ok=true;for(let i=1;i<parts;i++){{if(words.slice(i*size,(i+1)*size).join(" ")!==chunk){{ok=false;break}}}}if(ok)return chunk}}return text}}
@@ -1396,15 +1415,34 @@ class Handler(BaseHTTPRequestHandler):
                 offset = max(0, int((q.get("offset") or ["0"])[0] or "0"))
             except Exception:
                 offset = 0
+            scope = str((q.get("scope") or ["portal_visible"])[0] or "portal_visible").strip()
+            if scope not in {"portal_visible", "hidden", "incomplete", "all"}:
+                scope = "portal_visible"
             search = str((q.get("search") or [""])[0] or "").strip().lower()
-            entries = [public_admin_entry(entry) for entry in load_admin_entries()]
+            all_entries = load_admin_entries("all")
+            counts = {
+                "portal_visible": 0,
+                "hidden": 0,
+                "incomplete": 0,
+                "all": len(all_entries),
+            }
+            for entry in all_entries:
+                counts[admin_entry_scope(entry)] = counts.get(admin_entry_scope(entry), 0) + 1
+            entries = [public_admin_entry(entry) for entry in load_admin_entries(scope)]
             if search:
                 entries = [
                     entry for entry in entries
                     if search in " ".join(str(entry.get(key) or "") for key in ["title", "summary", "content_type", "video_url"]).lower()
                 ]
             total = len(entries)
-            self.send_json({"entries": entries[offset:offset + limit], "total": total, "limit": limit, "offset": offset})
+            self.send_json({
+                "entries": entries[offset:offset + limit],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "scope": scope,
+                "scope_counts": counts,
+            })
             return
         if parsed.path == "/api/admin/creators":
             if not self.require_admin():
