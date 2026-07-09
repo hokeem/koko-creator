@@ -502,6 +502,7 @@ GROUP_TERMS = ["多人", "围观", "群体", "路人", "儿童", "孩子", "pess
 SERVICE_TERMS = ["老板", "员工", "顾客", "服务", "客户", "chefe", "cliente", "funcionario", "funcionário", "atendimento", "entregador", "delivery"]
 MONEY_TERMS = ["付款", "欠钱", "逃单", "工资", "dinheiro", "pagar", "pagamento", "salario", "salário", "reais", "conta", "cobrar"]
 PRANK_TERMS = ["整蛊", "恶作剧", "捉弄", "pegadinha", "brincadeira", "susto", "troll", "zoeira"]
+ROLE_TERMS = ["homem", "mulher", "jovem", "rapaz", "moça", "moca", "senhor", "senhora", "menino", "menina"]
 MULTI_PERSON_TERMS = [
     "两个人", "两位", "二人", "男人和女人", "男孩和男人", "女孩和女人", "duas pessoas", "dois homens", "duas mulheres",
     "homem e mulher", "homem e uma mulher", "mulher e um homem", "menino e homem", "menino e um homem", "menina e mulher", "casal de amigos",
@@ -525,6 +526,11 @@ def selected_axis(selected: list[str], options: set[str]) -> str:
     return next((value for value in selected if value in options), "")
 
 
+def has_multiple_role_terms(text: str) -> bool:
+    found = {term for term in ROLE_TERMS if re.search(rf"\b{re.escape(term)}\b", text)}
+    return len(found) >= 2
+
+
 def entry_signals(entry: dict[str, Any]) -> dict[str, bool]:
     item = normalized_entry(entry)
     text = entry_match_text(item)
@@ -533,7 +539,7 @@ def entry_signals(entry: dict[str, Any]) -> dict[str, bool]:
     family = has_any(text, FAMILY_TERMS)
     friend = has_any(text, FRIEND_TERMS)
     group = has_any(text, GROUP_TERMS)
-    multi = has_any(text, MULTI_PERSON_TERMS)
+    multi = has_any(text, MULTI_PERSON_TERMS) or has_multiple_role_terms(text)
     service = has_any(text, SERVICE_TERMS)
     money = content_type in MONEY_TYPES or has_any(text, MONEY_TERMS)
     prank = content_type in PRANK_TYPES or has_any(text, PRANK_TERMS)
