@@ -45,49 +45,40 @@ SYNC_INTERVAL_SEC = int(os.environ.get("CREATOR_LIBRARY_SYNC_INTERVAL_SEC", "864
 ADMIN_PASSWORD = os.environ.get("KOKO_CREATOR_ADMIN_PASSWORD", "koko")
 ADMIN_COOKIE = "koko_creator_admin"
 
-DEFAULT_CONTENT_TYPE = "待分类"
-UNKNOWN_CONTENT_TYPES = {DEFAULT_CONTENT_TYPE, "A classificar", "Sem categoria", "未分类", ""}
+DEFAULT_CONTENT_TYPE = "朋友整蛊"
+CANONICAL_CONTENT_TYPES = ["夫妻整蛊/冲突", "夫妻暧昧", "家庭整蛊", "朋友整蛊"]
+UNKNOWN_CONTENT_TYPES = {"待分类", "A classificar", "Sem categoria", "未分类", "", "Popular", "热门", "还没想好，给我热门"}
 
 
 QUESTIONS = [
     {
         "id": "people",
-        "pt": "Quantas pessoas aparecem normalmente?",
-        "zh": "你们通常几个人拍？",
+        "pt": "Com quem você costuma gravar?",
+        "zh": "你通常跟谁一起拍？",
         "options": [
-            {"id": "solo", "pt": "Só eu", "zh": "我一个人拍", "types": ["骗子", "偷奸耍滑", "整蛊"], "keywords": ["假装", "反应", "秘密", "发现", "装病", "偷懒"]},
-            {"id": "duo", "pt": "Duas pessoas", "zh": "两个人拍", "types": ["夫妻吵架", "夫妻欺骗", "夫妻算计", "妻管严", "整蛊", "骗子", "赖账"], "keywords": ["夫妻", "妻子", "丈夫", "老公", "老婆", "情侣", "朋友", "同事"]},
-            {"id": "group", "pt": "Três ou mais", "zh": "三个人以上", "types": ["夫妻欺骗", "夫妻算计", "骗子", "整蛊", "撬墙角"], "keywords": ["妈妈", "爸爸", "儿子", "女儿", "家庭", "朋友", "多人", "误会"]},
+            {"id": "couple", "pt": "Casal / namorados", "zh": "夫妻/情侣", "types": ["夫妻整蛊/冲突", "夫妻暧昧"], "keywords": ["夫妻", "妻子", "丈夫", "老公", "老婆", "情侣", "marido", "esposa", "casal", "namorado", "namorada"]},
+            {"id": "family", "pt": "Família", "zh": "家庭", "types": ["家庭整蛊"], "keywords": ["妈妈", "爸爸", "儿子", "女儿", "家庭", "亲戚", "mãe", "pai", "filho", "filha", "família"]},
+            {"id": "friends", "pt": "Amigos / colegas", "zh": "朋友/同事", "types": ["朋友整蛊"], "keywords": ["朋友", "同事", "路人", "街头", "公共场景", "世界杯", "偷手机", "便利店", "amigo", "colega", "rua", "público", "cliente", "loja"]},
         ],
     },
     {
-        "id": "scene",
-        "pt": "Qual cena parece mais com seu conteúdo?",
-        "zh": "你最常拍哪种关系/场景？",
+        "id": "subtype",
+        "pt": "Que tipo de roteiro de casal você quer?",
+        "zh": "你想拍哪种夫妻/情侣剧情？",
         "options": [
-            {"id": "solo_reaction", "pt": "Reação / monólogo", "zh": "一个人反应/独白", "people": ["solo"], "types": ["骗子", "偷奸耍滑", "整蛊"], "keywords": ["独自", "一个人", "反应", "吐槽", "发现", "假装", "装病", "误会"]},
-            {"id": "solo_smart", "pt": "Esperteza / situação pessoal", "zh": "个人小聪明/自我处境", "people": ["solo"], "types": ["偷奸耍滑", "骗子"], "keywords": ["偷懒", "耍小聪明", "钻空子", "蒙混过关", "假装", "秘密", "尴尬"]},
-            {"id": "duo_couple", "pt": "Casal / namorados", "zh": "夫妻/情侣", "people": ["duo"], "types": ["夫妻吵架", "夫妻欺骗", "夫妻算计", "妻管严", "夫妻出轨", "夫妻整蛊"], "keywords": ["夫妻", "妻子", "丈夫", "老公", "老婆", "情侣", "吃醋", "约会"]},
-            {"id": "duo_friends", "pt": "Dois amigos / colegas", "zh": "两位朋友/同事", "people": ["duo"], "types": ["整蛊", "骗子", "偷奸耍滑", "撬墙角"], "keywords": ["朋友", "同事", "兄弟", "闺蜜", "套路", "恶作剧", "误会"]},
-            {"id": "duo_service", "pt": "Cliente / chefe / atendimento", "zh": "两人顾客/老板/服务", "people": ["duo"], "types": ["赖账", "骗子", "偷奸耍滑", "整蛊"], "keywords": ["老板", "员工", "顾客", "服务", "付款", "结账", "工资", "交易"]},
-            {"id": "group_family", "pt": "Família / filhos", "zh": "家庭/亲子", "people": ["group"], "types": ["夫妻欺骗", "夫妻算计"], "keywords": ["妈妈", "爸爸", "儿子", "女儿", "家庭", "亲戚"]},
-            {"id": "group_friends", "pt": "Grupo de amigos / colegas", "zh": "朋友群体/同事群", "people": ["group"], "types": ["整蛊", "骗子", "偷奸耍滑", "撬墙角"], "keywords": ["朋友", "同事", "兄弟", "闺蜜", "多人", "围观", "恶作剧", "误会"]},
-            {"id": "group_public", "pt": "Rua / público / confusão", "zh": "街头/围观/多人误会", "people": ["group"], "types": ["整蛊", "骗子", "赖账", "撬墙角"], "keywords": ["街头", "路人", "围观", "多人", "公共场合", "误会", "反转", "冲突"]},
+            {"id": "couple_prank", "pt": "Pegadinha / briga / virada", "zh": "夫妻整蛊/冲突", "people": ["couple"], "types": ["夫妻整蛊/冲突"], "keywords": ["吵架", "整蛊", "欺骗", "算计", "反转", "briga", "pegadinha", "conflito", "reviravolta"]},
+            {"id": "couple_flirt", "pt": "Ciúmes / traição / clima íntimo", "zh": "夫妻暧昧", "people": ["couple"], "types": ["夫妻暧昧"], "keywords": ["暧昧", "出轨", "好色", "吃醋", "撬墙角", "traição", "infiel", "amante", "ciúme", "seduz"]},
         ],
     },
     {
-        "id": "humor",
-        "pt": "Que tipo de graça você quer?",
-        "zh": "你想要哪种笑点？",
+        "id": "duration",
+        "pt": "Quanto tempo você costuma gravar?",
+        "zh": "你一般能拍多长？",
         "options": [
-            {"id": "banter", "pt": "Discussão e respostas rápidas", "zh": "拌嘴互怼", "people": ["duo"], "scenes": ["duo_couple"], "types": ["夫妻吵架", "妻管严", "夫妻算计"], "keywords": ["吵架", "争执", "训斥", "反驳", "打脸"]},
-            {"id": "twist", "pt": "Segredo e revelação", "zh": "隐瞒反转", "people": ["solo", "duo", "group"], "types": ["夫妻欺骗", "骗子", "夫妻算计"], "keywords": ["假装", "隐瞒", "谎称", "秘密", "真相", "发现"]},
-            {"id": "prank", "pt": "Pegadinha ou susto", "zh": "整蛊恶搞", "people": ["solo", "duo", "group"], "scenes": ["solo_reaction", "duo_friends", "duo_service", "group_friends", "group_public"], "types": ["整蛊"], "keywords": ["整蛊", "恶作剧", "捉弄", "陷阱", "反应"]},
-            {"id": "money", "pt": "Dinheiro ou vantagem", "zh": "钱/占便宜", "people": ["duo", "group"], "scenes": ["duo_service", "duo_friends", "group_public", "group_friends"], "types": ["赖账", "骗子", "夫妻算计"], "keywords": ["付款", "欠钱", "逃单", "结账", "便宜"]},
-            {"id": "sneaky", "pt": "Preguiça ou esperteza", "zh": "偷懒/偷吃/耍小聪明", "people": ["solo", "duo", "group"], "types": ["偷吃东西", "偷奸耍滑"], "keywords": ["偷吃", "偷喝", "偷懒", "装病", "耍小聪明"]},
-            {"id": "relationship", "pt": "Ciúmes / conflito de casal", "zh": "吃醋/亲密关系冲突", "people": ["duo"], "scenes": ["duo_couple"], "types": ["夫妻欺骗", "夫妻吵架", "夫妻出轨", "夫妻算计"], "keywords": ["吃醋", "出轨", "约会", "女友", "男友", "隐瞒", "吵架", "关系"]},
-            {"id": "group_misunderstanding", "pt": "Mal-entendido em grupo", "zh": "多人误会扩散", "people": ["group"], "types": ["整蛊", "骗子", "撬墙角"], "keywords": ["多人", "围观", "误会", "传播", "发现", "尴尬", "反转"]},
-            {"id": "hot", "pt": "Mostre os populares", "zh": "先看热门", "types": [], "keywords": ["热门", "完整", "反转", "误会", "简单"]},
+            {"id": "dur_1_20", "pt": "1-20 s", "zh": "1-20 秒", "keywords": []},
+            {"id": "dur_20_60", "pt": "20 s-1 min", "zh": "20 秒-1 分钟", "keywords": []},
+            {"id": "dur_60_120", "pt": "1-2 min", "zh": "1-2 分钟", "keywords": []},
+            {"id": "dur_120_plus", "pt": "Mais de 2 min", "zh": "2 分钟以上", "keywords": []},
         ],
     },
 ]
@@ -153,23 +144,7 @@ def apply_entry_override(entry: dict[str, Any], override: dict[str, Any] | None)
 
 
 def content_type_labels() -> list[str]:
-    labels = [DEFAULT_CONTENT_TYPE]
-    for question in QUESTIONS:
-        for option in question.get("options", []):
-            for label in option.get("types") or []:
-                if label not in labels:
-                    labels.append(label)
-    for label in [
-        "夫妻关系",
-        "整蛊恶搞",
-        "骗局反转",
-        "赖账/金钱冲突",
-        "偷吃/偷懒/耍小聪明",
-        "热门",
-    ]:
-        if label not in labels:
-            labels.append(label)
-    return labels
+    return list(CANONICAL_CONTENT_TYPES)
 
 
 def compact_text(value: object) -> str:
@@ -201,30 +176,104 @@ def first_repeated_url(value: object) -> str:
     return urls[0] if urls else text
 
 
+def canonical_content_type(entry: dict[str, Any] | str) -> str:
+    if isinstance(entry, str):
+        current = entry.strip()
+        text = current.lower()
+    else:
+        current = str(entry.get("content_type") or "").strip()
+        values: list[str] = [current]
+        for key in [
+            "title",
+            "whole_video_summary",
+            "summary",
+            "content_type_reasoning",
+            "video_url",
+            "html_url",
+            "pt_html_url",
+            "zh_html_url",
+        ]:
+            values.append(str(entry.get(key) or ""))
+        text = " ".join(values).lower()
+
+    if current in CANONICAL_CONTENT_TYPES:
+        return current
+
+    legacy_flirt = {
+        "夫妻暧昧",
+        "夫妻出轨",
+        "夫妻好色",
+        "夫妻黄段子",
+        "撬墙角",
+        "Relacionamento de casal",
+    }
+    legacy_couple = {
+        "夫妻整蛊/冲突",
+        "夫妻吵架",
+        "夫妻欺骗",
+        "夫妻算计",
+        "妻管严",
+        "夫妻整蛊",
+        "夫妻关系",
+        "夫妻/情侣",
+        "夫妻情感",
+        "Conflito por dinheiro",
+    }
+    legacy_family = {"家庭整蛊", "家庭/亲子"}
+    legacy_friends = {
+        "朋友整蛊",
+        "整蛊",
+        "整蛊恶搞",
+        "骗局反转",
+        "赖账",
+        "赖账/金钱冲突",
+        "骗子",
+        "偷奸耍滑",
+        "偷吃东西",
+        "偷吃/偷懒/耍小聪明",
+        "Popular",
+        "Golpe e reviravolta",
+        "Pegadinha",
+        "Esperteza cotidiana",
+        "待分类",
+        "热门",
+    }
+    if current in legacy_flirt:
+        return "夫妻暧昧"
+    if current in legacy_couple:
+        return "夫妻整蛊/冲突"
+    if current in legacy_family:
+        return "家庭整蛊"
+    if current in legacy_friends or current in UNKNOWN_CONTENT_TYPES:
+        return "朋友整蛊"
+
+    flirt_terms = [
+        "出轨", "暧昧", "好色", "黄段子", "撬墙角", "偷看", "吃醋",
+        "trai", "infiel", "amante", "ciúme", "ciume", "seduz", "paquera",
+        "mulher bonita", "namorada", "namorado", "beijo", "íntim", "intim",
+    ]
+    couple_terms = [
+        "夫妻", "妻子", "丈夫", "老公", "老婆", "情侣",
+        "marido", "esposa", "casal",
+    ]
+    family_terms = [
+        "家庭", "妈妈", "爸爸", "母亲", "父亲", "儿子", "女儿", "孩子", "亲戚",
+        "família", "familia", "mãe", "mae", "pai", "filho", "filha", "criança", "crianca",
+    ]
+    if any(term in text for term in flirt_terms):
+        return "夫妻暧昧"
+    if any(term in text for term in couple_terms):
+        return "夫妻整蛊/冲突"
+    if any(term in text for term in family_terms):
+        return "家庭整蛊"
+    return "朋友整蛊"
+
+
 def inferred_content_type(entry: dict[str, Any]) -> str:
     current = str(entry.get("content_type") or "").strip()
-    if current not in UNKNOWN_CONTENT_TYPES:
+    if current in CANONICAL_CONTENT_TYPES:
         return current
-    text = " ".join(
-        str(entry.get(key) or "")
-        for key in ["title", "whole_video_summary", "summary", "content_type_reasoning", "video_url"]
-    ).lower()
-    rules = [
-        ("夫妻出轨", ["trai", "infiel", "amante", "outra mulher", "outro homem", "encontro com outra"]),
-        ("夫妻欺骗", ["finge", "mentira", "engan", "segredo", "revel", "descobre", "surpresa"]),
-        ("夫妻算计", ["plano", "arma", "combina", "estrateg", "aproveit", "vantagem"]),
-        ("夫妻吵架", ["esposa", "marido", "casal", "briga", "discute", "zangada", "reclama"]),
-        ("整蛊", ["pegadinha", "brincadeira", "susto", "troll", "limite"]),
-        ("赖账", ["dinheiro", "reais", "salário", "pagar", "pagamento", "cliente", "contrat"]),
-        ("偷奸耍滑", ["esperteza", "pregui", "desculpa", "jeitinho", "evitar"]),
-        ("骗子", ["golpe", "engan", "fraude", "entrevista"]),
-    ]
-    for label, keywords in rules:
-        if any(keyword in text for keyword in keywords):
-            return label
-    if any(word in text for word in ["esposa", "marido", "casal", "namorado", "namorada"]):
-        return "夫妻/情侣"
-    return "热门"
+    return canonical_content_type(entry)
 
 
 def normalized_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -476,22 +525,15 @@ def option_lookup() -> dict[str, dict[str, Any]]:
     return {str(option["id"]): option for question in QUESTIONS for option in question.get("options", [])}
 
 
-PEOPLE_OPTIONS = {"solo", "duo", "group"}
-SCENE_OPTIONS = {
-    "solo_reaction",
-    "solo_smart",
-    "duo_couple",
-    "duo_friends",
-    "duo_service",
-    "group_family",
-    "group_friends",
-    "group_public",
-}
-HUMOR_OPTIONS = {"banter", "twist", "prank", "money", "sneaky", "relationship", "group_misunderstanding", "hot"}
-COUPLE_TYPES = {"夫妻吵架", "夫妻欺骗", "夫妻算计", "妻管严", "夫妻出轨", "夫妻整蛊", "夫妻关系", "夫妻/情侣"}
-MONEY_TYPES = {"赖账", "赖账/金钱冲突"}
-SNEAKY_TYPES = {"偷吃东西", "偷奸耍滑", "偷吃/偷懒/耍小聪明"}
-PRANK_TYPES = {"整蛊", "整蛊恶搞"}
+PEOPLE_OPTIONS = {"couple", "family", "friends"}
+SUBTYPE_OPTIONS = {"couple_prank", "couple_flirt"}
+DURATION_OPTIONS = {"dur_1_20", "dur_20_60", "dur_60_120", "dur_120_plus"}
+COUPLE_TYPES = {"夫妻整蛊/冲突", "夫妻暧昧"}
+FAMILY_TYPES = {"家庭整蛊"}
+FRIEND_TYPES = {"朋友整蛊"}
+MONEY_TYPES = set()
+SNEAKY_TYPES = set()
+PRANK_TYPES = {"夫妻整蛊/冲突", "家庭整蛊", "朋友整蛊"}
 COUPLE_TERMS = [
     "夫妻", "妻子", "丈夫", "老公", "老婆", "情侣", "男友", "女友", "出轨", "吃醋",
     "marido", "esposa", "casal", "namorado", "namorada", "noivo", "noiva", "ciume", "ciúme", "traicao", "traição", "infiel", "amante",
@@ -534,7 +576,7 @@ def has_multiple_role_terms(text: str) -> bool:
 def entry_signals(entry: dict[str, Any]) -> dict[str, bool]:
     item = normalized_entry(entry)
     text = entry_match_text(item)
-    content_type = str(item.get("content_type") or DEFAULT_CONTENT_TYPE)
+    content_type = canonical_content_type(item)
     couple = content_type in COUPLE_TYPES or has_any(text, COUPLE_TERMS)
     family = has_any(text, FAMILY_TERMS)
     friend = has_any(text, FRIEND_TERMS)
@@ -559,42 +601,17 @@ def entry_signals(entry: dict[str, Any]) -> dict[str, bool]:
 
 def entry_matches_hard_selection(entry: dict[str, Any], selected: list[str]) -> bool:
     people = selected_axis(selected, PEOPLE_OPTIONS)
-    scene = selected_axis(selected, SCENE_OPTIONS)
-    humor = selected_axis(selected, HUMOR_OPTIONS)
-    sig = entry_signals(entry)
-
-    if people == "solo" or scene in {"solo_reaction", "solo_smart"}:
-        if sig["couple"] or sig["family"] or sig["friend"] or sig["service"] or sig["group"] or sig["multi"]:
-            return False
-    elif people == "duo":
-        if scene == "duo_couple" or humor in {"banter", "relationship"}:
-            if not sig["couple"]:
-                return False
-        elif scene == "duo_friends":
-            if sig["couple"] or sig["family"] or sig["service"] or sig["group"]:
-                return False
-        elif scene == "duo_service":
-            if sig["couple"] or sig["family"] or sig["friend"] or sig["group"]:
-                return False
-            if not (sig["service"] or sig["money"]):
-                return False
-        elif sig["family"] or sig["group"]:
-            return False
-    elif people == "group":
-        if scene == "group_family" and not sig["family"]:
-            return False
-        if scene == "group_friends" and sig["couple"]:
-            return False
-        if scene == "group_public" and sig["couple"] and not (sig["group"] or sig["service"] or sig["money"]):
-            return False
-        if humor == "group_misunderstanding" and not (sig["group"] or sig["friend"] or sig["family"]):
-            return False
-
-    if humor == "money" and not (sig["money"] or sig["service"]):
+    subtype = selected_axis(selected, SUBTYPE_OPTIONS)
+    content_type = canonical_content_type(entry)
+    if people == "couple" and content_type not in COUPLE_TYPES:
         return False
-    if humor == "relationship" and not sig["couple"]:
+    if people == "family" and content_type != "家庭整蛊":
         return False
-    if humor == "banter" and people != "solo" and not sig["couple"]:
+    if people == "friends" and content_type != "朋友整蛊":
+        return False
+    if subtype == "couple_prank" and content_type != "夫妻整蛊/冲突":
+        return False
+    if subtype == "couple_flirt" and content_type != "夫妻暧昧":
         return False
     return True
 
@@ -602,14 +619,7 @@ def entry_matches_hard_selection(entry: dict[str, Any], selected: list[str]) -> 
 def filtered_entries_for_selection(entries: list[dict[str, Any]], selected: list[str]) -> list[dict[str, Any]]:
     if not selected:
         return entries
-    filtered = [entry for entry in entries if entry_matches_hard_selection(entry, selected)]
-    if filtered:
-        return filtered
-    people = selected_axis(selected, PEOPLE_OPTIONS)
-    scene = selected_axis(selected, SCENE_OPTIONS)
-    if people == "solo" or scene in {"solo_reaction", "solo_smart"}:
-        return [entry for entry in entries if not entry_signals(entry)["couple"]]
-    return entries
+    return [entry for entry in entries if entry_matches_hard_selection(entry, selected)]
 
 
 def score_entry(entry: dict[str, Any], selected: list[str], index: int) -> int:
@@ -620,7 +630,7 @@ def score_entry(entry: dict[str, Any], selected: list[str], index: int) -> int:
         entry_summary(entry),
         str(entry.get("content_type_reasoning") or ""),
     ])
-    content_type = str(entry.get("content_type") or DEFAULT_CONTENT_TYPE)
+    content_type = canonical_content_type(entry)
     score = 0
     for option_id in selected:
         option = lookup.get(option_id) or {}
@@ -1363,8 +1373,13 @@ const I={{pt:{{homePill:"Biblioteca de roteiros",homeTitle:"Encontre roteiros qu
 const t=k=>(I[lang]&&I[lang][k])||k; const label=x=>lang==="zh"?x.zh:x.pt; const esc=v=>String(v||"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[c]));
 function optionAllowed(opt){{if(!opt)return false;if(Array.isArray(opt.people)&&opt.people.length&&!opt.people.includes(answers.people))return false;if(Array.isArray(opt.scenes)&&opt.scenes.length&&!opt.scenes.includes(answers.scene))return false;return true}}
 function optionsFor(q){{return(q.options||[]).filter(optionAllowed)}}
+function stepAvailable(i){{const q=questions[i];return !!q&&optionsFor(q).length>0}}
+function stepCountLabel(){{return questions.filter((_,i)=>stepAvailable(i)).length||questions.length}}
+function currentStepPosition(){{let n=0;for(let i=0;i<=step;i++)if(stepAvailable(i))n++;return Math.max(1,n)}}
+function goStep(delta){{let i=step+delta;while(i>=0&&i<questions.length&&!stepAvailable(i))i+=delta;if(i>=0&&i<questions.length){{step=i;renderQuestion();return true}}return false}}
+function nextAvailableAfter(i){{let n=i+1;while(n<questions.length&&!stepAvailable(n))n++;return n<questions.length?n:-1}}
 function normalizeAnswers(){{let changed=false;questions.forEach(q=>{{const opts=optionsFor(q);if(!opts.length)return;if(!opts.some(o=>o.id===answers[q.id])){{answers[q.id]=opts[0].id;changed=true}}}});if(changed)saveProfile();return changed}}
-function selectedAnswerValues(){{normalizeAnswers();return questions.map(q=>answers[q.id]).filter(Boolean)}}
+function selectedAnswerValues(){{normalizeAnswers();return questions.filter((q,i)=>stepAvailable(i)).map(q=>answers[q.id]).filter(Boolean)}}
 function hasProfile(){{return !!localStorage.getItem(profileKey)}} function saveProfile(){{localStorage.setItem(profileKey,JSON.stringify(answers))}} function saveWorkspace(){{localStorage.setItem(workspaceKey,JSON.stringify(workspace)); counts()}} function saveProfileUi(){{localStorage.setItem(profileUiKey,JSON.stringify(profileUi))}}
 function updateCreatorName(){{const node=document.querySelector("#creator-name");if(node)node.textContent=creatorUser?.name?creatorUser.name:"Koko Creator"}}
 function updateProfileImages(){{const avatar=document.querySelector("#profile-avatar");const cover=document.querySelector("#profile-cover");if(avatar){{avatar.classList.toggle("has-image",!!profileUi.avatar);avatar.style.backgroundImage=profileUi.avatar?`url("${{profileUi.avatar}}")`:""}}if(cover&&profileUi.cover)cover.style.backgroundImage=`url("${{profileUi.cover}}")`}}
@@ -1380,7 +1395,7 @@ function setStatus(id,status){{["saved","planned","finished","rejected"].forEach
 function counts(){{const n=document.querySelector("#count-new");if(n)n.textContent=String(entries.length);const s=document.querySelector("#count-saved");if(s)s.textContent=String((workspace.saved||[]).length);const p=document.querySelector("#count-planned");if(p)p.textContent=String((workspace.planned||[]).length);updateProfileHeader()}}
 function applyLang(){{document.documentElement.lang=lang==="zh"?"zh-CN":"pt-BR";document.querySelectorAll("[data-lang]").forEach(b=>b.classList.toggle("active",b.dataset.lang===lang));document.querySelectorAll("[data-t]").forEach(n=>n.textContent=t(n.dataset.t));document.querySelectorAll("[data-html]").forEach(n=>n.innerHTML=t(n.dataset.html));renderQuestion();renderCurrent();counts();setAuthMode(authMode)}}
 function show(v){{if(v==="library")v="dashboard";if(["dashboard","saved","all-scripts"].includes(v)&&(!creatorUser||!hasProfile()))v="home";if(v==="choose"&&!creatorUser)v="home";if(v==="choose")step=0;document.querySelectorAll("[data-view]").forEach(x=>x.classList.toggle("active",x.dataset.view===v));if(v==="choose")renderQuestion();if(v==="dashboard")renderDashboard();if(v==="all-scripts")renderAllScripts();if(v==="saved")renderSaved();document.querySelectorAll(".bottom button").forEach(b=>b.classList.toggle("active",b.dataset.go===v||v==="all-scripts"&&b.dataset.go==="dashboard"));scrollTo({{top:0,behavior:"smooth"}})}}
-function renderQuestion(){{normalizeAnswers();const q=questions[step];const opts=optionsFor(q);document.querySelector("#step-label").textContent=lang==="zh"?`${{t("step")}} ${{step+1}} / 3`:`${{t("step")}} ${{step+1}} de 3`;document.querySelector("#stepper").innerHTML=questions.map((_,i)=>`<button class="step ${{i===step?"active":""}}" type="button" data-step="${{i}}">${{i+1}}</button>`).join("");document.querySelector("#question").innerHTML=`<h1>${{esc(label(q))}}</h1><div class="options">${{opts.map(o=>`<button class="option ${{answers[q.id]===o.id?"selected":""}}" data-answer="${{q.id}}" data-value="${{o.id}}">${{esc(label(o))}}</button>`).join("")}}</div>`;const next=document.querySelector("#next-step span");if(next)next.textContent=step===questions.length-1?t("finish"):t("next");const prev=document.querySelector("#prev-step");if(prev){{prev.style.visibility=step===0?"hidden":"visible";prev.disabled=step===0}}}}
+function renderQuestion(){{normalizeAnswers();if(!stepAvailable(step)){{const first=questions.findIndex((_,i)=>stepAvailable(i));step=first>=0?first:0}}const q=questions[step];const opts=optionsFor(q);const total=stepCountLabel();const pos=currentStepPosition();document.querySelector("#step-label").textContent=lang==="zh"?`${{t("step")}} ${{pos}} / ${{total}}`:`${{t("step")}} ${{pos}} de ${{total}}`;document.querySelector("#stepper").innerHTML=questions.map((_,i)=>stepAvailable(i)?`<button class="step ${{i===step?"active":""}}" type="button" data-step="${{i}}">${{questions.slice(0,i+1).filter((_,j)=>stepAvailable(j)).length}}</button>`:"").join("");document.querySelector("#question").innerHTML=`<h1>${{esc(label(q))}}</h1><div class="options">${{opts.map(o=>`<button class="option ${{answers[q.id]===o.id?"selected":""}}" data-answer="${{q.id}}" data-value="${{o.id}}">${{esc(label(o))}}</button>`).join("")}}</div>`;const next=document.querySelector("#next-step span");if(next)next.textContent=nextAvailableAfter(step)<0?t("finish"):t("next");const prev=document.querySelector("#prev-step");if(prev){{prev.style.visibility=questions.slice(0,step).some((_,i)=>stepAvailable(i))?"visible":"hidden";prev.disabled=prev.style.visibility==="hidden"}}}}
 function entryTimestamp(e){{const raw=e.script_date||e.created_at||e.saved_at||"";const n=Date.parse(raw);return Number.isNaN(n)?0:n}}
 let entriesLoadedLimit=0;let entriesLoadedKey="";
 function recommendationKey(){{return selectedAnswerValues().join("|")}}
@@ -1430,7 +1445,7 @@ function hydrateVideo(e){{if(!e.video_url)return;setTimeout(async()=>{{const box
 function scriptLoading(){{return `<section class="script-loading"><b>${{lang==="zh"?"脚本加载中请耐心等待":"Roteiro carregando, aguarde um momento"}}</b><span>${{lang==="zh"?"正在整理完整脚本内容，加载完成后会自动显示。":"Estamos preparando o roteiro completo. Ele aparecerá automaticamente."}}</span><div class="script-progress" aria-hidden="true"></div></section>`}}
 function normalizeLabel(s){{return String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[：:]/g,"").trim()}}
 function compactText(s){{return String(s||"").replace(/\s+/g," ").trim()}}
-function ptTag(value){{const raw=String(value||"").trim();const key=raw.toLowerCase();const map={{"待分类":"A classificar","热门":"Popular","还没想好，给我热门":"Popular","夫妻关系":"Relacionamento de casal","夫妻欺骗":"Conflito de casal","夫妻/情侣":"Casal / namorados","夫妻情感":"Casal / namorados","夫妻吵架":"Discussão de casal","夫妻出轨":"Traição de casal","夫妻算计":"Plano de casal","妻管严":"Controle no casal","夫妻整蛊":"Pegadinha de casal","隐瞒反转":"Segredo e revelação","骗局反转":"Golpe e reviravolta","整蛊恶搞":"Pegadinha","整蛊":"Pegadinha","赖账/金钱冲突":"Conflito por dinheiro","赖账":"Conflito por dinheiro","偷吃/偷懒/耍小聪明":"Esperteza cotidiana","偷奸耍滑":"Esperteza cotidiana","骗子":"Golpe","撬墙角":"Triângulo amoroso","偷吃东西":"Comer escondido","Relacionamento de casal":"Relacionamento de casal","Conflito por dinheiro":"Conflito por dinheiro","Pegadinha":"Pegadinha","Golpe e reviravolta":"Golpe e reviravolta","Esperteza cotidiana":"Esperteza cotidiana","Popular":"Popular",saved:"Salvo",planned:"Planejado",finished:"Gravado"}};return map[raw]||map[key]||raw.replace(/_/g," ")}}
+function ptTag(value){{const raw=String(value||"").trim();const key=raw.toLowerCase();const map={{"夫妻整蛊/冲突":"Pegadinha/conflito de casal","夫妻暧昧":"Ciúmes/traição de casal","家庭整蛊":"Pegadinha em família","朋友整蛊":"Pegadinha com amigos/colegas","待分类":"Pegadinha com amigos/colegas","热门":"Pegadinha com amigos/colegas","还没想好，给我热门":"Pegadinha com amigos/colegas","夫妻关系":"Pegadinha/conflito de casal","夫妻欺骗":"Pegadinha/conflito de casal","夫妻/情侣":"Pegadinha/conflito de casal","夫妻情感":"Pegadinha/conflito de casal","夫妻吵架":"Pegadinha/conflito de casal","夫妻出轨":"Ciúmes/traição de casal","夫妻好色":"Ciúmes/traição de casal","夫妻黄段子":"Ciúmes/traição de casal","夫妻算计":"Pegadinha/conflito de casal","妻管严":"Pegadinha/conflito de casal","夫妻整蛊":"Pegadinha/conflito de casal","隐瞒反转":"Pegadinha com amigos/colegas","骗局反转":"Pegadinha com amigos/colegas","整蛊恶搞":"Pegadinha com amigos/colegas","整蛊":"Pegadinha com amigos/colegas","赖账/金钱冲突":"Pegadinha com amigos/colegas","赖账":"Pegadinha com amigos/colegas","偷吃/偷懒/耍小聪明":"Pegadinha com amigos/colegas","偷奸耍滑":"Pegadinha com amigos/colegas","骗子":"Pegadinha com amigos/colegas","撬墙角":"Ciúmes/traição de casal","偷吃东西":"Pegadinha com amigos/colegas","Relacionamento de casal":"Pegadinha/conflito de casal","Conflito por dinheiro":"Pegadinha com amigos/colegas","Pegadinha":"Pegadinha com amigos/colegas","Golpe e reviravolta":"Pegadinha com amigos/colegas","Esperteza cotidiana":"Pegadinha com amigos/colegas","Popular":"Pegadinha com amigos/colegas",saved:"Salvo",planned:"Planejado",finished:"Gravado"}};return map[raw]||map[key]||raw.replace(/_/g," ")}}
 const storyboardDemoUrl="/static/storyboard_sick_wife_demo.png";
 function hasChinese(s){{return /[\u4e00-\u9fff]/.test(String(s||""))}}
 function collapseRepeatedText(s){{let text=compactText(s);if(!text)return "";for(let parts=2;parts<=4;parts++){{if(text.length%parts)continue;const size=text.length/parts;const chunk=text.slice(0,size).trim();if(chunk&&Array.from({{length:parts}},(_,i)=>text.slice(i*size,(i+1)*size).trim()).every(x=>x===chunk))return chunk}}const words=text.split(/\s+/);for(let parts=2;parts<=4;parts++){{if(words.length%parts)continue;const size=words.length/parts;const chunk=words.slice(0,size).join(" ");let ok=true;for(let i=1;i<parts;i++){{if(words.slice(i*size,(i+1)*size).join(" ")!==chunk){{ok=false;break}}}}if(ok)return chunk}}return text}}
@@ -1457,7 +1472,7 @@ async function openDetail(id){{const modal=document.querySelector("#modal");moda
 async function submitVideo(id){{const input=document.querySelector(`[data-submit-url="${{id}}"]`);const status=document.querySelector(`#submit-status-${{id}}`);const video_url=String(input?.value||"").trim();if(!video_url){{status.textContent=t("submitError");return}}status.textContent=lang==="zh"?"提交中...":"Enviando...";try{{const r=await fetch("/api/creator/submissions",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{entry_id:id,video_url,creator_id:"creator"}})}});if(!r.ok)throw new Error();status.textContent=t("submitOk");await loadSubmissions();setStatus(id,"finished");savedTab="finished"}}catch(e){{status.textContent=t("submitError")}}}}
 function closeDetail(){{document.querySelectorAll("#modal video").forEach(v=>{{try{{v.pause();v.removeAttribute("src");v.load()}}catch(e){{}}}});document.querySelector("#modal").classList.remove("active");document.querySelector("#detail").innerHTML=""}}
 function handleProfileImage(kind,file){{if(!file||!file.type.startsWith("image/"))return;const reader=new FileReader();reader.onload=()=>{{profileUi[kind]=String(reader.result||"");saveProfileUi();updateProfileImages()}};reader.readAsDataURL(file)}}
-document.addEventListener("click",async e=>{{const l=e.target.closest("[data-lang]");if(l){{lang=l.dataset.lang;localStorage.setItem(langKey,lang);applyLang();return}}if(e.target.closest("[data-logout]")){{logout();return}}if(e.target.closest("[data-feature-next]")){{featuredOffset++;renderDashboard();return}}const upload=e.target.closest("[data-upload-trigger]");if(upload){{document.querySelector(`#profile-${{upload.dataset.uploadTrigger}}-input`)?.click();return}}const jump=e.target.closest("[data-tab-jump]");if(jump){{savedTab=jump.dataset.tabJump;show("saved");return}}const authOpen=e.target.closest("[data-auth-open]");if(authOpen){{openAuth(authOpen.dataset.authOpen||"login");return}}if(e.target.closest("[data-auth-close]")){{closeAuth();return}}const authToggle=e.target.closest("[data-auth-toggle]");if(authToggle){{setAuthMode(authMode==="register"?"login":"register");return}}const reselect=e.target.closest("[data-reselect]");if(reselect){{show("choose");return}}const stepNav=e.target.closest("[data-step]");if(stepNav){{step=Number(stepNav.dataset.step)||0;renderQuestion();return}}if(e.target.closest("#prev-step")){{if(step>0){{step--;renderQuestion()}}return}}const tab=e.target.closest("[data-tab]");if(tab){{savedTab=tab.dataset.tab;renderSaved();return}}const shootMonth=e.target.closest("[data-shoot-month]");if(shootMonth){{shiftScheduleMonth(Number(shootMonth.dataset.shootMonth)||0);return}}const shootDate=e.target.closest("[data-shoot-date]");if(shootDate){{scheduleViewDate=shootDate.dataset.shootDate;renderScheduleFeed();return}}const d=e.target.closest("[data-detail]");if(d){{openDetail(d.dataset.detail);return}}if(e.target.closest("[data-close]")||e.target.id==="modal"){{closeDetail();return}}const copy=e.target.closest("[data-copy-share]");if(copy){{const id=copy.dataset.copyShare;const ok=await copyText(shareUrl(id));showShareLink(id,ok);const label=copy.querySelector("span");if(label)label.textContent=ok?(lang==="zh"?"已复制":"Copiado"):(lang==="zh"?"复制失败，请手动复制":"Copie manualmente");return}}const scrollSubmit=e.target.closest("[data-submit-scroll]");if(scrollSubmit){{document.querySelector(`[data-submit-url="${{scrollSubmit.dataset.submitScroll}}"]`)?.scrollIntoView({{behavior:"smooth",block:"center"}});return}}const sub=e.target.closest("[data-submit]");if(sub){{submitVideo(sub.dataset.submit);return}}const st=e.target.closest("[data-status]");if(st){{const inDetail=!!st.closest("#detail");setStatus(st.dataset.entry,st.dataset.status);if(inDetail){{const fresh=entry(st.dataset.entry);if(fresh)renderDetail(fresh)}}else{{const label=st.querySelector("span");if(label)label.textContent=t(st.dataset.status==="saved"?"saved":st.dataset.status==="planned"?"plan":"save")}}return}}const go=e.target.closest("[data-go]");if(go){{if(go.dataset.savedTab)savedTab=go.dataset.savedTab;show(go.dataset.go);return}}const ans=e.target.closest("[data-answer]");if(ans){{answers[ans.dataset.answer]=ans.dataset.value;normalizeAnswers();saveProfile();if(step<questions.length-1){{step++;renderQuestion()}}else{{show("dashboard")}}return}}if(e.target.closest("#next-step")){{if(step<questions.length-1){{step++;renderQuestion()}}else{{normalizeAnswers();saveProfile();show("dashboard")}}}}}});
+document.addEventListener("click",async e=>{{const l=e.target.closest("[data-lang]");if(l){{lang=l.dataset.lang;localStorage.setItem(langKey,lang);applyLang();return}}if(e.target.closest("[data-logout]")){{logout();return}}if(e.target.closest("[data-feature-next]")){{featuredOffset++;renderDashboard();return}}const upload=e.target.closest("[data-upload-trigger]");if(upload){{document.querySelector(`#profile-${{upload.dataset.uploadTrigger}}-input`)?.click();return}}const jump=e.target.closest("[data-tab-jump]");if(jump){{savedTab=jump.dataset.tabJump;show("saved");return}}const authOpen=e.target.closest("[data-auth-open]");if(authOpen){{openAuth(authOpen.dataset.authOpen||"login");return}}if(e.target.closest("[data-auth-close]")){{closeAuth();return}}const authToggle=e.target.closest("[data-auth-toggle]");if(authToggle){{setAuthMode(authMode==="register"?"login":"register");return}}const reselect=e.target.closest("[data-reselect]");if(reselect){{show("choose");return}}const stepNav=e.target.closest("[data-step]");if(stepNav){{step=Number(stepNav.dataset.step)||0;renderQuestion();return}}if(e.target.closest("#prev-step")){{goStep(-1);return}}const tab=e.target.closest("[data-tab]");if(tab){{savedTab=tab.dataset.tab;renderSaved();return}}const shootMonth=e.target.closest("[data-shoot-month]");if(shootMonth){{shiftScheduleMonth(Number(shootMonth.dataset.shootMonth)||0);return}}const shootDate=e.target.closest("[data-shoot-date]");if(shootDate){{scheduleViewDate=shootDate.dataset.shootDate;renderScheduleFeed();return}}const d=e.target.closest("[data-detail]");if(d){{openDetail(d.dataset.detail);return}}if(e.target.closest("[data-close]")||e.target.id==="modal"){{closeDetail();return}}const copy=e.target.closest("[data-copy-share]");if(copy){{const id=copy.dataset.copyShare;const ok=await copyText(shareUrl(id));showShareLink(id,ok);const label=copy.querySelector("span");if(label)label.textContent=ok?(lang==="zh"?"已复制":"Copiado"):(lang==="zh"?"复制失败，请手动复制":"Copie manualmente");return}}const scrollSubmit=e.target.closest("[data-submit-scroll]");if(scrollSubmit){{document.querySelector(`[data-submit-url="${{scrollSubmit.dataset.submitScroll}}"]`)?.scrollIntoView({{behavior:"smooth",block:"center"}});return}}const sub=e.target.closest("[data-submit]");if(sub){{submitVideo(sub.dataset.submit);return}}const st=e.target.closest("[data-status]");if(st){{const inDetail=!!st.closest("#detail");setStatus(st.dataset.entry,st.dataset.status);if(inDetail){{const fresh=entry(st.dataset.entry);if(fresh)renderDetail(fresh)}}else{{const label=st.querySelector("span");if(label)label.textContent=t(st.dataset.status==="saved"?"saved":st.dataset.status==="planned"?"plan":"save")}}return}}const go=e.target.closest("[data-go]");if(go){{if(go.dataset.savedTab)savedTab=go.dataset.savedTab;show(go.dataset.go);return}}const ans=e.target.closest("[data-answer]");if(ans){{answers[ans.dataset.answer]=ans.dataset.value;normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard");return}}if(e.target.closest("#next-step")){{normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard")}}}});
 document.addEventListener("click",e=>{{const dateBtn=e.target.closest("[data-schedule-date]");if(dateBtn){{scheduleSelectedDate=dateBtn.dataset.scheduleDate;renderCalendar();return}}if(e.target.closest("[data-schedule-close]")){{closeScheduleModal();return}}if(e.target.closest("[data-schedule-confirm]")){{if(scheduleDraftId){{saveScheduleItem(scheduleDraftId,scheduleSelectedDate||todayKey());savedTab="schedule";closeScheduleModal();show("saved")}}return}}}});document.addEventListener("click",e=>{{const st=e.target.closest("[data-status]");if(st&&st.dataset.status==="saved"){{const id=st.dataset.entry;setTimeout(()=>openScheduleModal(id),80)}}}});
 document.querySelector("#auth-form").addEventListener("submit",handleAuthSubmit);
 document.querySelector("#profile-avatar-input")?.addEventListener("change",e=>handleProfileImage("avatar",e.target.files?.[0]));
