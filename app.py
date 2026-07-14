@@ -176,13 +176,24 @@ def first_repeated_url(value: object) -> str:
     return urls[0] if urls else text
 
 
+def has_family_signal(text: str) -> bool:
+    chinese_terms = ["家庭", "妈妈", "爸爸", "母亲", "父亲", "儿子", "女儿", "孩子", "小孩", "亲戚", "婆婆", "岳母"]
+    if any(term in text for term in chinese_terms):
+        return True
+    word_terms = [
+        "família", "familia", "mãe", "mae", "pai", "filho", "filha", "criança", "crianca",
+        "crianças", "criancas", "bebê", "bebe", "sogra", "irmão", "irmao", "irmã", "irma",
+    ]
+    return any(re.search(rf"(?<![\\wÀ-ÿ]){re.escape(term)}(?![\\wÀ-ÿ])", text, flags=re.I) for term in word_terms)
+
+
 def canonical_content_type(entry: dict[str, Any] | str) -> str:
     if isinstance(entry, str):
         current = entry.strip()
         text = current.lower()
     else:
         current = str(entry.get("content_type") or "").strip()
-        values: list[str] = [current]
+        values: list[str] = []
         for key in [
             "title",
             "whole_video_summary",
@@ -216,7 +227,7 @@ def canonical_content_type(entry: dict[str, Any] | str) -> str:
         "夫妻情感",
         "Conflito por dinheiro",
     }
-    legacy_family = {"家庭整蛊", "家庭/亲子"}
+    legacy_family = {"家庭/亲子"}
     legacy_friends = {
         "朋友整蛊",
         "整蛊",
@@ -235,14 +246,9 @@ def canonical_content_type(entry: dict[str, Any] | str) -> str:
         "待分类",
         "热门",
     }
-    family_terms = [
-        "家庭", "妈妈", "爸爸", "母亲", "父亲", "儿子", "女儿", "孩子", "小孩", "亲戚", "婆婆", "岳母",
-        "família", "familia", "mãe", "mae", "pai", "filho", "filha", "criança", "crianca", "crianças", "criancas",
-        "bebê", "bebe", "sogra", "irmão", "irmao", "irmã", "irma",
-    ]
-    if current in legacy_family or any(term in text for term in family_terms):
+    if current in legacy_family or has_family_signal(text):
         return "家庭整蛊"
-    if current in CANONICAL_CONTENT_TYPES:
+    if current in CANONICAL_CONTENT_TYPES and current != "家庭整蛊":
         return current
 
     flirt_terms = [
