@@ -196,9 +196,6 @@ def canonical_content_type(entry: dict[str, Any] | str) -> str:
             values.append(str(entry.get(key) or ""))
         text = " ".join(values).lower()
 
-    if current in CANONICAL_CONTENT_TYPES:
-        return current
-
     legacy_flirt = {
         "夫妻暧昧",
         "夫妻出轨",
@@ -238,14 +235,15 @@ def canonical_content_type(entry: dict[str, Any] | str) -> str:
         "待分类",
         "热门",
     }
-    if current in legacy_flirt:
-        return "夫妻暧昧"
-    if current in legacy_couple:
-        return "夫妻整蛊/冲突"
-    if current in legacy_family:
+    family_terms = [
+        "家庭", "妈妈", "爸爸", "母亲", "父亲", "儿子", "女儿", "孩子", "小孩", "亲戚", "婆婆", "岳母",
+        "família", "familia", "mãe", "mae", "pai", "filho", "filha", "criança", "crianca", "crianças", "criancas",
+        "bebê", "bebe", "sogra", "irmão", "irmao", "irmã", "irma",
+    ]
+    if current in legacy_family or any(term in text for term in family_terms):
         return "家庭整蛊"
-    if current in legacy_friends or current in UNKNOWN_CONTENT_TYPES:
-        return "朋友整蛊"
+    if current in CANONICAL_CONTENT_TYPES:
+        return current
 
     flirt_terms = [
         "出轨", "暧昧", "好色", "黄段子", "撬墙角", "偷看", "吃醋",
@@ -256,16 +254,17 @@ def canonical_content_type(entry: dict[str, Any] | str) -> str:
         "夫妻", "妻子", "丈夫", "老公", "老婆", "情侣",
         "marido", "esposa", "casal",
     ]
-    family_terms = [
-        "家庭", "妈妈", "爸爸", "母亲", "父亲", "儿子", "女儿", "孩子", "亲戚",
-        "família", "familia", "mãe", "mae", "pai", "filho", "filha", "criança", "crianca",
-    ]
+    if current in legacy_flirt:
+        return "夫妻暧昧"
+    if current in legacy_couple:
+        return "夫妻整蛊/冲突"
+    if current in legacy_friends or current in UNKNOWN_CONTENT_TYPES:
+        return "朋友整蛊"
+
     if any(term in text for term in flirt_terms):
         return "夫妻暧昧"
     if any(term in text for term in couple_terms):
         return "夫妻整蛊/冲突"
-    if any(term in text for term in family_terms):
-        return "家庭整蛊"
     return "朋友整蛊"
 
 
