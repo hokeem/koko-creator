@@ -269,9 +269,6 @@ def canonical_content_type(entry: dict[str, Any] | str) -> str:
 
 
 def inferred_content_type(entry: dict[str, Any]) -> str:
-    current = str(entry.get("content_type") or "").strip()
-    if current in CANONICAL_CONTENT_TYPES:
-        return current
     return canonical_content_type(entry)
 
 
