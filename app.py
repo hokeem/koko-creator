@@ -184,7 +184,7 @@ def has_family_signal(text: str) -> bool:
         "família", "familia", "mãe", "mae", "pai", "filho", "filha", "criança", "crianca",
         "crianças", "criancas", "bebê", "bebe", "sogra", "irmão", "irmao", "irmã", "irma",
     ]
-    return any(re.search(rf"(?<![\\wÀ-ÿ]){re.escape(term)}(?![\\wÀ-ÿ])", text, flags=re.I) for term in word_terms)
+    return any(re.search(rf"(?<![\wÀ-ÿ]){re.escape(term)}(?![\wÀ-ÿ])", text, flags=re.I) for term in word_terms)
 
 
 def canonical_content_type(entry: dict[str, Any] | str) -> str:
