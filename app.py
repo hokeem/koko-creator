@@ -177,14 +177,18 @@ def first_repeated_url(value: object) -> str:
 
 
 def has_family_signal(text: str) -> bool:
-    chinese_terms = ["家庭", "妈妈", "爸爸", "母亲", "父亲", "儿子", "女儿", "孩子", "小孩", "亲戚", "婆婆", "岳母"]
+    chinese_terms = ["妈妈", "爸爸", "母亲", "父亲", "儿子", "女儿", "孩子", "小孩", "宝宝", "亲戚", "婆婆", "岳母", "兄弟", "姐妹"]
     if any(term in text for term in chinese_terms):
         return True
     word_terms = [
-        "família", "familia", "mãe", "mae", "pai", "filho", "filha", "criança", "crianca",
-        "crianças", "criancas", "bebê", "bebe", "sogra", "irmão", "irmao", "irmã", "irma",
+        "mãe", "mae", "pai", "filho", "filha", "criança", "crianca", "crianças", "criancas",
+        "bebê", "bebe", "sogra", "sogro", "irmão", "irmao", "irmã", "irma",
     ]
     return any(re.search(rf"(?<![\wÀ-ÿ]){re.escape(term)}(?![\wÀ-ÿ])", text, flags=re.I) for term in word_terms)
+
+
+def has_any_signal(text: str, terms: list[str]) -> bool:
+    return any(term in text for term in terms)
 
 
 def canonical_content_type(entry: dict[str, Any] | str) -> str:
@@ -198,7 +202,6 @@ def canonical_content_type(entry: dict[str, Any] | str) -> str:
             "title",
             "whole_video_summary",
             "summary",
-            "content_type_reasoning",
             "video_url",
             "html_url",
             "pt_html_url",
@@ -246,11 +249,6 @@ def canonical_content_type(entry: dict[str, Any] | str) -> str:
         "待分类",
         "热门",
     }
-    if current in legacy_family or has_family_signal(text):
-        return "家庭整蛊"
-    if current in CANONICAL_CONTENT_TYPES and current != "家庭整蛊":
-        return current
-
     flirt_terms = [
         "出轨", "暧昧", "好色", "黄段子", "撬墙角", "偷看", "吃醋",
         "trai", "infiel", "amante", "ciúme", "ciume", "seduz", "paquera",
@@ -260,17 +258,20 @@ def canonical_content_type(entry: dict[str, Any] | str) -> str:
         "夫妻", "妻子", "丈夫", "老公", "老婆", "情侣",
         "marido", "esposa", "casal",
     ]
-    if current in legacy_flirt:
+    has_family = current in legacy_family or has_family_signal(text)
+    has_flirt = current in legacy_flirt or has_any_signal(text, flirt_terms)
+    has_couple = current in legacy_couple or has_any_signal(text, couple_terms)
+
+    if has_family:
+        return "家庭整蛊"
+    if has_flirt:
         return "夫妻暧昧"
-    if current in legacy_couple:
+    if has_couple:
         return "夫妻整蛊/冲突"
+    if current in CANONICAL_CONTENT_TYPES and current != "家庭整蛊":
+        return current
     if current in legacy_friends or current in UNKNOWN_CONTENT_TYPES:
         return "朋友整蛊"
-
-    if any(term in text for term in flirt_terms):
-        return "夫妻暧昧"
-    if any(term in text for term in couple_terms):
-        return "夫妻整蛊/冲突"
     return "朋友整蛊"
 
 
