@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import html
 import http.client
+import hmac
 import json
 import mimetypes
 import os
@@ -33,6 +35,7 @@ MANUAL_LIBRARY_FILE = DATA_ROOT / "manual_creator_scripts.json"
 SUBMISSIONS_FILE = DATA_ROOT / "creator_submissions.json"
 INTAKE_FILE = DATA_ROOT / "creator_intake_submissions.json"
 CREATORS_FILE = DATA_ROOT / "creator_profiles.json"
+ACCOUNTS_FILE = DATA_ROOT / "creator_accounts.json"
 THUMB_CACHE_FILE = DATA_ROOT / "creator_thumbnail_cache.json"
 VIDEO_SOURCE_CACHE_FILE = DATA_ROOT / "creator_video_source_cache.json"
 SCRIPT_HTML_CACHE_DIR = DATA_ROOT / "creator_script_html_cache"
@@ -44,6 +47,24 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://koko-fpml.onrender.
 SYNC_INTERVAL_SEC = int(os.environ.get("CREATOR_LIBRARY_SYNC_INTERVAL_SEC", "86400"))
 ADMIN_PASSWORD = os.environ.get("KOKO_CREATOR_ADMIN_PASSWORD", "koko")
 ADMIN_COOKIE = "koko_creator_admin"
+CREATOR_AUTH_COOKIE = "koko_creator_auth"
+DEFAULT_ALLOWED_ACCOUNTS = [
+    "88996177106",
+    "13996855249",
+    "85987869447",
+    "95991319838",
+    "99991605452",
+    "88981741082",
+    "88998113027",
+    "86998490156",
+    "88999263655",
+    "88988853941",
+    "61982331597",
+    "88997515250",
+    "88988061712",
+    "88998411165",
+    "666",
+]
 
 DEFAULT_CONTENT_TYPE = "朋友整蛊"
 CANONICAL_CONTENT_TYPES = ["夫妻整蛊/冲突", "夫妻暧昧", "家庭整蛊", "朋友整蛊"]
@@ -983,6 +1004,7 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Script not found.")
     meta = link_metadata(video_url)
     fallback_thumb = f"/api/creator/thumbnail/{entry_id}.webp"
+    creator_id = normalize_account_key(str(payload.get("creator_id") or "local_creator"))
     submission = {
         "submission_id": uuid4().hex,
         "entry_id": entry_id,
@@ -990,7 +1012,7 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
         "script_content_type": str(entry.get("content_type") or DEFAULT_CONTENT_TYPE),
         "submitted_title": meta.get("title") or str(entry.get("title") or ""),
         "thumbnail_url": meta.get("image") or fallback_thumb,
-        "creator_id": str(payload.get("creator_id") or "local_creator").strip()[:120],
+        "creator_id": creator_id or "local_creator",
         "video_url": video_url,
         "status": "pending_review",
         "created_at": now_iso(),
@@ -1129,6 +1151,146 @@ def cookie_value(headers: Any, name: str) -> str:
 def is_admin_authed(headers: Any) -> bool:
     token = cookie_value(headers, ADMIN_COOKIE)
     return bool(token) and secrets.compare_digest(token, ADMIN_PASSWORD)
+
+
+def normalize_account_key(value: str) -> str:
+    return re.sub(r"[^0-9A-Za-z_@.-]+", "", str(value or "").strip())[:80]
+
+
+def account_signature(account_id: str) -> str:
+    secret = (ADMIN_PASSWORD or "koko").encode("utf-8")
+    return hmac.new(secret, account_id.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def make_account_token(account_id: str) -> str:
+    return f"{account_id}.{account_signature(account_id)[:24]}"
+
+
+def account_id_from_token(token: str) -> str:
+    account_id, dot, signature = str(token or "").partition(".")
+    if not dot or not account_id or not signature:
+        return ""
+    expected = account_signature(account_id)[:24]
+    return account_id if hmac.compare_digest(signature, expected) else ""
+
+
+def load_accounts() -> list[dict[str, Any]]:
+    accounts = read_json_file(ACCOUNTS_FILE, [])
+    if not isinstance(accounts, list):
+        accounts = []
+    seen = {str(item.get("account_id") or "") for item in accounts if isinstance(item, dict)}
+    changed = False
+    for key in DEFAULT_ALLOWED_ACCOUNTS:
+        account_id = normalize_account_key(key)
+        if account_id and account_id not in seen:
+            accounts.append({
+                "account_id": account_id,
+                "phone": account_id,
+                "display_name": account_id,
+                "status": "active",
+                "created_at": now_iso(),
+                "source": "seed",
+                "state": {},
+            })
+            seen.add(account_id)
+            changed = True
+    if changed:
+        write_json_atomic(ACCOUNTS_FILE, accounts[:5000])
+    return [item for item in accounts if isinstance(item, dict)]
+
+
+def save_accounts(accounts: list[dict[str, Any]]) -> None:
+    write_json_atomic(ACCOUNTS_FILE, accounts[:5000])
+
+
+def public_account(account: dict[str, Any], *, include_state: bool = False) -> dict[str, Any]:
+    account_id = str(account.get("account_id") or "").strip()
+    submissions = [
+        item for item in read_json_file(SUBMISSIONS_FILE, [])
+        if isinstance(item, dict) and str(item.get("creator_id") or "") == account_id
+    ]
+    state = account.get("state") if isinstance(account.get("state"), dict) else {}
+    workspace = state.get("workspace") if isinstance(state, dict) and isinstance(state.get("workspace"), dict) else {}
+    payload = {
+        "account_id": account_id,
+        "phone": str(account.get("phone") or account_id),
+        "display_name": str(account.get("display_name") or account_id),
+        "status": str(account.get("status") or "active"),
+        "created_at": str(account.get("created_at") or ""),
+        "updated_at": str(account.get("updated_at") or ""),
+        "last_login_at": str(account.get("last_login_at") or ""),
+        "saved_count": len(workspace.get("saved") or []),
+        "scheduled_count": sum(len(v) for v in (workspace.get("schedule") or {}).values() if isinstance(v, list)) if isinstance(workspace.get("schedule"), dict) else 0,
+        "submission_count": len(submissions),
+        "submissions": submissions[:50],
+    }
+    if include_state:
+        payload["state"] = state
+    return payload
+
+
+def find_account(account_id: str) -> dict[str, Any] | None:
+    target = normalize_account_key(account_id)
+    for account in load_accounts():
+        if str(account.get("account_id") or "") == target:
+            return account
+    return None
+
+
+def upsert_account(account_id: str, *, source: str = "admin", display_name: str = "") -> dict[str, Any]:
+    clean = normalize_account_key(account_id)
+    if not clean:
+        raise ValueError("账号只能包含数字、字母、下划线、@、点或短横线。")
+    accounts = load_accounts()
+    now = now_iso()
+    for idx, account in enumerate(accounts):
+        if str(account.get("account_id") or "") == clean:
+            account["status"] = str(account.get("status") or "active")
+            account["display_name"] = display_name or str(account.get("display_name") or clean)
+            account["updated_at"] = now
+            accounts[idx] = account
+            save_accounts(accounts)
+            return public_account(account, include_state=True)
+    account = {
+        "account_id": clean,
+        "phone": clean,
+        "display_name": display_name or clean,
+        "status": "active",
+        "created_at": now,
+        "updated_at": now,
+        "source": source,
+        "state": {},
+    }
+    accounts.insert(0, account)
+    save_accounts(accounts)
+    return public_account(account, include_state=True)
+
+
+def current_account(headers: Any) -> dict[str, Any] | None:
+    account_id = account_id_from_token(cookie_value(headers, CREATOR_AUTH_COOKIE))
+    if not account_id:
+        return None
+    account = find_account(account_id)
+    if not account or str(account.get("status") or "active") != "active":
+        return None
+    return account
+
+
+def update_account_state(account_id: str, state_patch: dict[str, Any]) -> dict[str, Any]:
+    clean = normalize_account_key(account_id)
+    accounts = load_accounts()
+    for idx, account in enumerate(accounts):
+        if str(account.get("account_id") or "") == clean:
+            state = account.get("state") if isinstance(account.get("state"), dict) else {}
+            for key in ["preferences", "workspace", "profile_ui", "language"]:
+                if key in state_patch:
+                    state[key] = state_patch[key]
+            account["state"] = state
+            account["updated_at"] = now_iso()
+            accounts[idx] = account
+            save_accounts(accounts)
+            return public_account(account, include_state=True)
+    raise ValueError("Account not found.")
 
 
 def public_admin_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -1469,7 +1631,6 @@ def page_html() -> str:
 <div class="schedule-overlay" id="schedule-modal"><section class="schedule-sheet"><div class="schedule-head"><h2 id="schedule-title">加入拍摄日历</h2><button class="schedule-close" type="button" data-schedule-close>×</button></div><p class="schedule-note" id="schedule-note">选择你准备拍摄这个脚本的日期。</p><div class="calendar-grid" id="calendar-grid"></div><div class="schedule-actions"><button class="secondary" type="button" data-schedule-close>Mais tarde</button><button class="primary" type="button" data-schedule-confirm>加入拍摄日历</button></div></section></div>
 <script>
 const questions={questions_json}; const profileKey="koko_profile_v1"; const workspaceKey="koko_workspace_v1"; const langKey="koko_lang"; const authKey="koko_creator_user_v1"; const profileUiKey="koko_creator_profile_ui_v1";
-const allowedPhones=new Set(["88996177106","13996855249","85987869447","95991319838","99991605452","88981741082","88998113027","86998490156","88999263655","88988853941","61982331597","88997515250","88988061712","88998411165","666"]);
 let lang=localStorage.getItem(langKey)||"pt"; let step=0; let savedTab="finished"; let featuredOffset=0; let entries=[]; let submissions=[];
 let answers=JSON.parse(localStorage.getItem(profileKey)||"null")||{{people:"duo",scene:"couple",humor:"twist"}};
 let workspace=JSON.parse(localStorage.getItem(workspaceKey)||"null")||{{saved:[],planned:[],finished:[],rejected:[],schedule:{{}}}};
@@ -1490,16 +1651,18 @@ function goStep(delta){{let i=step+delta;while(i>=0&&i<questions.length&&!stepAv
 function nextAvailableAfter(i){{let n=i+1;while(n<questions.length&&!stepAvailable(n))n++;return n<questions.length?n:-1}}
 function normalizeAnswers(){{let changed=false;questions.forEach(q=>{{const opts=optionsFor(q);if(!opts.length)return;if(!opts.some(o=>o.id===answers[q.id])){{answers[q.id]=opts[0].id;changed=true}}}});if(changed)saveProfile();return changed}}
 function selectedAnswerValues(){{normalizeAnswers();return questions.filter((q,i)=>stepAvailable(i)).map(q=>answers[q.id]).filter(Boolean)}}
-function hasProfile(){{return !!localStorage.getItem(profileKey)}} function saveProfile(){{localStorage.setItem(profileKey,JSON.stringify(answers))}} function saveWorkspace(){{localStorage.setItem(workspaceKey,JSON.stringify(workspace)); counts()}} function saveProfileUi(){{localStorage.setItem(profileUiKey,JSON.stringify(profileUi))}}
-function updateCreatorName(){{const node=document.querySelector("#creator-name");if(node)node.textContent=creatorUser?.name?creatorUser.name:"Koko Creator"}}
+function hasProfile(){{return !!localStorage.getItem(profileKey)}} function saveProfile(){{localStorage.setItem(profileKey,JSON.stringify(answers));persistAccountState()}} function saveWorkspace(){{localStorage.setItem(workspaceKey,JSON.stringify(workspace)); counts();persistAccountState()}} function saveProfileUi(){{localStorage.setItem(profileUiKey,JSON.stringify(profileUi));persistAccountState()}}
+function updateCreatorName(){{const node=document.querySelector("#creator-name");if(node)node.textContent=creatorUser?.display_name||creatorUser?.account_id||creatorUser?.phone||creatorUser?.name||"Koko Creator"}}
 function updateProfileImages(){{const avatar=document.querySelector("#profile-avatar");const cover=document.querySelector("#profile-cover");if(avatar){{avatar.classList.toggle("has-image",!!profileUi.avatar);avatar.style.backgroundImage=profileUi.avatar?`url("${{profileUi.avatar}}")`:""}}if(cover&&profileUi.cover)cover.style.backgroundImage=`url("${{profileUi.cover}}")`}}
 function updateProfileHeader(){{updateCreatorName();updateProfileImages();const filters=document.querySelector("#profile-filters");if(filters)filters.innerHTML=chips();const saved=document.querySelector("#profile-count-saved");if(saved)saved.textContent=String((workspace.saved||[]).length);const planned=document.querySelector("#profile-count-planned");if(planned)planned.textContent=String((workspace.planned||[]).length);const finished=document.querySelector("#profile-count-finished");if(finished)finished.textContent=String(submissions.length||0)}}
 function authCopy(){{const zh=lang==="zh";return {{login:zh?"电话号码登录":"Entrar com telefone",phone:zh?"请输入电话号码":"Digite o numero de telefone",submit:zh?"登录":"Entrar",missing:zh?"请输入电话号码":"Digite o numero de telefone",notFound:zh?"找不到电话":"Telefone não encontrado"}}}}
 function setAuthMode(mode){{authMode="login";const c=authCopy();document.querySelector("#auth-title").textContent=c.login;document.querySelector("#auth-submit").textContent=c.submit;document.querySelector("#auth-phone").placeholder=c.phone}}
 function openAuth(mode="login"){{setAuthMode(mode);document.querySelector("#auth-modal").classList.add("active")}}
 function closeAuth(){{document.querySelector("#auth-modal").classList.remove("active")}}
-function handleAuthSubmit(e){{e.preventDefault();const form=new FormData(e.currentTarget);const phone=String(form.get("phone")||"").replace(/\\s+/g,"").trim();if(!phone){{alert(authCopy().missing);return}}if(!allowedPhones.has(phone)){{alert(authCopy().notFound);return}}creatorUser={{name:phone,phone,created_at:new Date().toISOString()}};localStorage.setItem(authKey,JSON.stringify(creatorUser));updateCreatorName();closeAuth();if(!hasProfile())show("choose");else show("dashboard")}}
-function logout(){{creatorUser=null;localStorage.removeItem(authKey);closeDetail();closeAuth();show("home")}}
+async function loadAccountState(){{if(!creatorUser)return null;try{{const r=await fetch(`/api/me/state?_=${{Date.now()}}`);const d=await r.json();if(r.status===401){{creatorUser=null;localStorage.removeItem(authKey);return null}}if(!r.ok)throw new Error(d.error||"state failed");creatorUser=d.account||creatorUser;localStorage.setItem(authKey,JSON.stringify(creatorUser));const state=d.state||{{}};if(state.preferences){{answers=state.preferences;localStorage.setItem(profileKey,JSON.stringify(answers))}}if(state.workspace){{workspace=state.workspace;if(!workspace.schedule||Array.isArray(workspace.schedule))workspace.schedule={{}};localStorage.setItem(workspaceKey,JSON.stringify(workspace))}}if(state.profile_ui){{profileUi=state.profile_ui;localStorage.setItem(profileUiKey,JSON.stringify(profileUi))}}submissions=Array.isArray(d.submissions)?d.submissions:submissions;return d}}catch(err){{return null}}}}
+let persistTimer=null;function persistAccountState(){{if(!creatorUser)return;if(persistTimer)clearTimeout(persistTimer);persistTimer=setTimeout(async()=>{{try{{await fetch("/api/me/state",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{preferences:answers,workspace,profile_ui:profileUi,language:lang}})}})}}catch(err){{}}}},260)}}
+async function handleAuthSubmit(e){{e.preventDefault();const form=new FormData(e.currentTarget);const phone=String(form.get("phone")||"").replace(/\\s+/g,"").trim();if(!phone){{alert(authCopy().missing);return}}try{{const r=await fetch("/api/auth/login",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{phone}})}});const d=await r.json();if(!r.ok)throw new Error(d.error||authCopy().notFound);creatorUser=d.account;localStorage.setItem(authKey,JSON.stringify(creatorUser));await loadAccountState();updateCreatorName();closeAuth();if(!hasProfile())show("choose");else show("dashboard")}}catch(err){{alert(authCopy().notFound)}}}}
+async function logout(){{creatorUser=null;localStorage.removeItem(authKey);await fetch("/api/auth/logout",{{method:"POST",body:"{{}}"}}).catch(()=>null);closeDetail();closeAuth();show("home")}}
 function ids(k){{return new Set(workspace[k]||[])}} function statusOf(id){{return ids("planned").has(id)?"planned":ids("finished").has(id)?"finished":ids("rejected").has(id)?"rejected":ids("saved").has(id)?"saved":""}} function entry(id){{return entries.find(e=>e.entry_id===id)}}
 function setStatus(id,status){{["saved","planned","finished","rejected"].forEach(k=>workspace[k]=(workspace[k]||[]).filter(x=>x!==id)); if(status) workspace[status]=[...(workspace[status]||[]),id]; saveWorkspace(); renderCurrent()}}
 function counts(){{const n=document.querySelector("#count-new");if(n)n.textContent=String(entries.length);const s=document.querySelector("#count-saved");if(s)s.textContent=String((workspace.saved||[]).length);const p=document.querySelector("#count-planned");if(p)p.textContent=String((workspace.planned||[]).length);updateProfileHeader()}}
@@ -1580,7 +1743,7 @@ function renderScriptSlot(html,e){{return html?cleanScriptHtml(html,e):`<article
 function renderDetail(e){{const s=statusOf(e.entry_id);const liked=ids("saved").has(e.entry_id);document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><div class="detail-content">${{detailCover(e)}}<h2 class="detail-title">${{esc(ptTitle(e))}}</h2><div class="tags"><span class="tag">${{esc(ptTag(e.content_type))}}</span>${{durationLabel(e)?`<span class="tag">${{esc(durationLabel(e))}}</span>`:""}}${{s?`<span class="tag">${{esc(ptTag(s))}}</span>`:""}}</div><div class="share-box" id="share-output"></div><div id="script-html-slot">${{e.script_html?renderScriptSlot(e.script_html,e):scriptLoading()}}</div>${{videoPreview(e)}}<section class="submit"><b>${{t("submitTitle")}}</b><p class="lead">${{t("submitHint")}}</p><input type="url" data-submit-url="${{esc(e.entry_id)}}" placeholder="${{t("submitPlaceholder")}}"><button class="primary" data-submit="${{esc(e.entry_id)}}">${{t("submitButton")}}</button><div id="submit-status-${{esc(e.entry_id)}}"></div></section><div class="social-actions"><button class="social-btn" type="button" data-status="${{liked?"":"saved"}}" data-entry="${{esc(e.entry_id)}}" aria-label="${{t("save")}}">♡<span>${{liked?(lang==="zh"?"已收藏":"Salvo"):(lang==="zh"?"收藏":"Salvar")}}</span></button><button class="social-btn" type="button" data-copy-share="${{esc(e.entry_id)}}" aria-label="${{lang==="zh"?"复制分享链接":"Copiar link"}}">↗<span>${{lang==="zh"?"分享":"Compartilhar"}}</span></button></div></div>`}}
 function loadDetailHtml(e){{if(e.script_html)return;setTimeout(async()=>{{try{{const html=await fetchScriptHtml(e.entry_id);const slot=document.querySelector("#script-html-slot");if(slot)slot.innerHTML=renderScriptSlot(html,e)}}catch(err){{const slot=document.querySelector("#script-html-slot");if(slot)slot.innerHTML=renderScriptSlot("",{{...e,summary:e.summary||err.message}})}}}},300)}}
 async function openDetail(id){{const modal=document.querySelector("#modal");modal.classList.add("active");const local=entry(id);if(local){{renderDetail(local);hydrateVideo(local);loadDetailHtml(local);return}}document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><section class="state card"><h3>${{lang==="zh"?"正在加载脚本..." :"Carregando roteiro..."}}</h3></section>`;try{{const e=await fetchScript(id);renderDetail(e);hydrateVideo(e);loadDetailHtml(e)}}catch(err){{document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><section class="state card"><h3>${{lang==="zh"?"脚本加载失败":"Falha ao carregar"}}</h3><p>${{esc(err.message)}}</p></section>`}}}}
-async function submitVideo(id){{const input=document.querySelector(`[data-submit-url="${{id}}"]`);const status=document.querySelector(`#submit-status-${{id}}`);const video_url=String(input?.value||"").trim();if(!video_url){{status.textContent=t("submitError");return}}status.textContent=lang==="zh"?"提交中...":"Enviando...";try{{const r=await fetch("/api/creator/submissions",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{entry_id:id,video_url,creator_id:"creator"}})}});if(!r.ok)throw new Error();status.textContent=t("submitOk");await loadSubmissions();setStatus(id,"finished");savedTab="finished"}}catch(e){{status.textContent=t("submitError")}}}}
+async function submitVideo(id){{const input=document.querySelector(`[data-submit-url="${{id}}"]`);const status=document.querySelector(`#submit-status-${{id}}`);const video_url=String(input?.value||"").trim();if(!video_url){{status.textContent=t("submitError");return}}status.textContent=lang==="zh"?"提交中...":"Enviando...";try{{const r=await fetch("/api/creator/submissions",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{entry_id:id,video_url,creator_id:creatorUser?.account_id||creatorUser?.phone||"creator"}})}});if(!r.ok)throw new Error();status.textContent=t("submitOk");await loadSubmissions();setStatus(id,"finished");savedTab="finished"}}catch(e){{status.textContent=t("submitError")}}}}
 function closeDetail(){{document.querySelectorAll("#modal video").forEach(v=>{{try{{v.pause();v.removeAttribute("src");v.load()}}catch(e){{}}}});document.querySelector("#modal").classList.remove("active");document.querySelector("#detail").innerHTML=""}}
 function handleProfileImage(kind,file){{if(!file||!file.type.startsWith("image/"))return;const reader=new FileReader();reader.onload=()=>{{profileUi[kind]=String(reader.result||"");saveProfileUi();updateProfileImages()}};reader.readAsDataURL(file)}}
 document.addEventListener("click",async e=>{{const l=e.target.closest("[data-lang]");if(l){{lang=l.dataset.lang;localStorage.setItem(langKey,lang);applyLang();return}}if(e.target.closest("[data-logout]")){{logout();return}}if(e.target.closest("[data-feature-next]")){{featuredOffset++;renderDashboard();return}}const upload=e.target.closest("[data-upload-trigger]");if(upload){{document.querySelector(`#profile-${{upload.dataset.uploadTrigger}}-input`)?.click();return}}const jump=e.target.closest("[data-tab-jump]");if(jump){{savedTab=jump.dataset.tabJump;show("saved");return}}const authOpen=e.target.closest("[data-auth-open]");if(authOpen){{openAuth(authOpen.dataset.authOpen||"login");return}}if(e.target.closest("[data-auth-close]")){{closeAuth();return}}const authToggle=e.target.closest("[data-auth-toggle]");if(authToggle){{setAuthMode(authMode==="register"?"login":"register");return}}const reselect=e.target.closest("[data-reselect]");if(reselect){{show("choose");return}}const stepNav=e.target.closest("[data-step]");if(stepNav){{step=Number(stepNav.dataset.step)||0;renderQuestion();return}}if(e.target.closest("#prev-step")){{goStep(-1);return}}const tab=e.target.closest("[data-tab]");if(tab){{savedTab=tab.dataset.tab;renderSaved();return}}const shootMonth=e.target.closest("[data-shoot-month]");if(shootMonth){{shiftScheduleMonth(Number(shootMonth.dataset.shootMonth)||0);return}}const shootDate=e.target.closest("[data-shoot-date]");if(shootDate){{scheduleViewDate=shootDate.dataset.shootDate;renderScheduleFeed();return}}const d=e.target.closest("[data-detail]");if(d){{openDetail(d.dataset.detail);return}}if(e.target.closest("[data-close]")||e.target.id==="modal"){{closeDetail();return}}const copy=e.target.closest("[data-copy-share]");if(copy){{const id=copy.dataset.copyShare;const ok=await copyText(shareUrl(id));showShareLink(id,ok);const label=copy.querySelector("span");if(label)label.textContent=ok?(lang==="zh"?"已复制":"Copiado"):(lang==="zh"?"复制失败，请手动复制":"Copie manualmente");return}}const scrollSubmit=e.target.closest("[data-submit-scroll]");if(scrollSubmit){{document.querySelector(`[data-submit-url="${{scrollSubmit.dataset.submitScroll}}"]`)?.scrollIntoView({{behavior:"smooth",block:"center"}});return}}const sub=e.target.closest("[data-submit]");if(sub){{submitVideo(sub.dataset.submit);return}}const st=e.target.closest("[data-status]");if(st){{const inDetail=!!st.closest("#detail");setStatus(st.dataset.entry,st.dataset.status);if(inDetail){{const fresh=entry(st.dataset.entry);if(fresh)renderDetail(fresh)}}else{{const label=st.querySelector("span");if(label)label.textContent=t(st.dataset.status==="saved"?"saved":st.dataset.status==="planned"?"plan":"save")}}return}}const go=e.target.closest("[data-go]");if(go){{if(go.dataset.savedTab)savedTab=go.dataset.savedTab;show(go.dataset.go);return}}const ans=e.target.closest("[data-answer]");if(ans){{answers[ans.dataset.answer]=ans.dataset.value;normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard");return}}if(e.target.closest("#next-step")){{normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard")}}}});
@@ -1588,7 +1751,7 @@ document.addEventListener("click",e=>{{const dateBtn=e.target.closest("[data-sch
 document.querySelector("#auth-form").addEventListener("submit",handleAuthSubmit);
 document.querySelector("#profile-avatar-input")?.addEventListener("change",e=>handleProfileImage("avatar",e.target.files?.[0]));
 document.querySelector("#profile-cover-input")?.addEventListener("change",e=>handleProfileImage("cover",e.target.files?.[0]));
-applyLang();setAuthMode("login");show(forceLanding?"home":initialScriptId?"dashboard":creatorUser&&hasProfile()?"dashboard":"home");if(initialScriptId)openDetail(initialScriptId);
+async function bootstrap(){{if(creatorUser)await loadAccountState();applyLang();setAuthMode("login");show(forceLanding?"home":initialScriptId?"dashboard":creatorUser&&hasProfile()?"dashboard":"home");if(initialScriptId)openDetail(initialScriptId)}}bootstrap();
 </script></body></html>"""
 
 
@@ -1799,8 +1962,34 @@ class Handler(BaseHTTPRequestHandler):
                 intakes = []
             self.send_json({"ok": True, "intakes": intakes, "total": len(intakes)})
             return
+        if parsed.path == "/api/admin/accounts":
+            if not self.require_admin():
+                return
+            accounts = [public_account(item, include_state=True) for item in load_accounts()]
+            self.send_json({"ok": True, "accounts": accounts, "total": len(accounts)})
+            return
+        if parsed.path == "/api/me/state":
+            account = current_account(self.headers)
+            if not account:
+                self.send_json({"error": "Not logged in."}, status=401)
+                return
+            public = public_account(account, include_state=True)
+            self.send_json({
+                "ok": True,
+                "account": {k: v for k, v in public.items() if k != "state"},
+                "state": public.get("state") or {},
+                "submissions": public.get("submissions") or [],
+            })
+            return
         if parsed.path == "/api/creator/submissions":
-            self.send_json({"submissions": read_json_file(SUBMISSIONS_FILE, [])})
+            account = current_account(self.headers)
+            submissions = read_json_file(SUBMISSIONS_FILE, [])
+            if not isinstance(submissions, list):
+                submissions = []
+            if account:
+                account_id = str(account.get("account_id") or "")
+                submissions = [item for item in submissions if isinstance(item, dict) and str(item.get("creator_id") or "") == account_id]
+            self.send_json({"submissions": submissions})
             return
         if parsed.path == "/api/creator/sync-status":
             meta = read_json_file(SYNC_META_FILE, {})
@@ -1858,6 +2047,53 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(raw)
             return
+        if parsed.path == "/api/auth/login":
+            try:
+                payload = self.read_body()
+            except Exception:
+                payload = {}
+            account_id = normalize_account_key(str(payload.get("phone") or payload.get("account_id") or ""))
+            account = find_account(account_id)
+            if not account or str(account.get("status") or "active") != "active":
+                self.send_json({"error": "Telefone não encontrado"}, status=404)
+                return
+            accounts = load_accounts()
+            for idx, item in enumerate(accounts):
+                if str(item.get("account_id") or "") == account_id:
+                    item["last_login_at"] = now_iso()
+                    accounts[idx] = item
+                    account = item
+                    save_accounts(accounts)
+                    break
+            public = public_account(account, include_state=True)
+            raw = json.dumps({
+                "ok": True,
+                "account": {k: v for k, v in public.items() if k != "state"},
+                "state": public.get("state") or {},
+                "submissions": public.get("submissions") or [],
+            }, ensure_ascii=False).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Set-Cookie", f"{CREATOR_AUTH_COOKIE}={urllib.parse.quote(make_account_token(account_id))}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax")
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+        if parsed.path == "/api/auth/logout":
+            self.send_json({"ok": True}, headers=[("Set-Cookie", f"{CREATOR_AUTH_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")])
+            return
+        if parsed.path == "/api/me/state":
+            account = current_account(self.headers)
+            if not account:
+                self.send_json({"error": "Not logged in."}, status=401)
+                return
+            try:
+                public = update_account_state(str(account.get("account_id") or ""), self.read_body())
+                self.send_json({"ok": True, "account": {k: v for k, v in public.items() if k != "state"}, "state": public.get("state") or {}})
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+            return
         if parsed.path == "/api/admin/scripts/bulk-delete":
             if not self.require_admin():
                 return
@@ -1883,6 +2119,19 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self.send_json({"ok": True, "creator": create_or_update_creator_profile(self.read_body())}, status=201)
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+            return
+        if parsed.path == "/api/admin/accounts":
+            if not self.require_admin():
+                return
+            try:
+                payload = self.read_body()
+                account = upsert_account(
+                    str(payload.get("account") or payload.get("phone") or payload.get("account_id") or ""),
+                    display_name=str(payload.get("display_name") or ""),
+                )
+                self.send_json({"ok": True, "account": account}, status=201)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
             return
@@ -1912,7 +2161,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/creator/submissions":
             try:
-                self.send_json({"ok": True, "submission": save_submission(self.read_body())}, status=201)
+                payload = self.read_body()
+                account = current_account(self.headers)
+                if account:
+                    payload["creator_id"] = str(account.get("account_id") or "")
+                self.send_json({"ok": True, "submission": save_submission(payload)}, status=201)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
             return
