@@ -279,6 +279,75 @@ def inferred_content_type(entry: dict[str, Any]) -> str:
     return canonical_content_type(entry)
 
 
+def parse_timecode_seconds(value: object) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    nums = [int(part) for part in re.findall(r"\d+", text)]
+    if len(nums) >= 3:
+        return float(nums[-3] * 3600 + nums[-2] * 60 + nums[-1])
+    if len(nums) >= 2:
+        return float(nums[-2] * 60 + nums[-1])
+    if nums:
+        return float(nums[-1])
+    return 0.0
+
+
+def duration_bucket_from_seconds(seconds: float) -> str:
+    if seconds <= 0:
+        return ""
+    if seconds <= 20:
+        return "dur_1_20"
+    if seconds <= 60:
+        return "dur_20_60"
+    if seconds <= 120:
+        return "dur_60_120"
+    return "dur_120_plus"
+
+
+def extract_duration_seconds_from_text(value: object) -> float:
+    text = html.unescape(re.sub(r"<[^>]+>", " ", str(value or "")))
+    if not text:
+        return 0.0
+    candidates: list[float] = []
+    for match in re.finditer(r"(?:\d{1,2}:)?\d{1,2}:\d{2}\s*[-–—]\s*((?:\d{1,2}:)?\d{1,2}:\d{2})", text):
+        candidates.append(parse_timecode_seconds(match.group(1)))
+    if candidates:
+        return max(candidates)
+    for match in re.finditer(r"(?:\d{1,2}:)?\d{1,2}:\d{2}", text):
+        candidates.append(parse_timecode_seconds(match.group(0)))
+    return max(candidates) if candidates else 0.0
+
+
+def extract_duration_seconds_from_script_json(script_json: dict[str, Any]) -> float:
+    rows = script_json.get("segments") or script_json.get("rows") or script_json.get("script_table") or []
+    if not isinstance(rows, list):
+        return 0.0
+    values: list[float] = []
+    for row in rows:
+        if isinstance(row, dict):
+            values.append(parse_timecode_seconds(row.get("time") or row.get("tempo") or row.get("Tempo") or ""))
+    return max(values) if values else 0.0
+
+
+def entry_duration_seconds(entry: dict[str, Any]) -> float:
+    for key in ["duration_seconds", "script_duration_seconds"]:
+        try:
+            value = float(entry.get(key) or 0)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    return extract_duration_seconds_from_text(" ".join(str(entry.get(key) or "") for key in ["script_html", "script_table_html", "html"]))
+
+
+def duration_bucket_for_entry(entry: dict[str, Any]) -> str:
+    bucket = str(entry.get("duration_bucket") or entry.get("script_duration_bucket") or "").strip()
+    if bucket in DURATION_OPTIONS:
+        return bucket
+    return duration_bucket_from_seconds(entry_duration_seconds(entry))
+
+
 def normalized_entry(entry: dict[str, Any]) -> dict[str, Any]:
     item = dict(entry)
     item["title"] = collapse_repeated_text(item.get("title") or "")
@@ -287,6 +356,10 @@ def normalized_entry(entry: dict[str, Any]) -> dict[str, Any]:
     )
     item["video_url"] = first_repeated_url(item.get("video_url") or "")
     item["content_type"] = inferred_content_type(item)
+    seconds = entry_duration_seconds(item)
+    if seconds > 0:
+        item["duration_seconds"] = round(seconds, 2)
+        item["duration_bucket"] = duration_bucket_from_seconds(seconds)
     return item
 
 
@@ -404,6 +477,8 @@ def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         "A classificar": DEFAULT_CONTENT_TYPE,
         "Sem categoria": DEFAULT_CONTENT_TYPE,
     }.get(content_type, content_type)
+    duration_seconds = extract_duration_seconds_from_script_json(script_json) or extract_duration_seconds_from_text(html_content)
+    duration_bucket = duration_bucket_from_seconds(duration_seconds)
     imported = {
         "entry_id": entry_id,
         "parent_job_id": str(entry.get("parent_job_id") or f"creator_import_{entry_id}"),
@@ -415,6 +490,8 @@ def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         "content_type_source": str(entry.get("content_type_source") or "manual"),
         "content_type_reasoning": str(entry.get("content_type_reasoning") or "Imported from Creator admin Excel."),
         "content_type_confidence": str(entry.get("content_type_confidence") or "high"),
+        "duration_seconds": round(duration_seconds, 2) if duration_seconds > 0 else 0,
+        "duration_bucket": duration_bucket,
         "whole_video_summary": collapse_repeated_text(
             entry.get("whole_video_summary") or script_json.get("whole_video_summary") or ""
         ),
@@ -531,6 +608,12 @@ def option_lookup() -> dict[str, dict[str, Any]]:
 PEOPLE_OPTIONS = {"couple", "family", "friends"}
 SUBTYPE_OPTIONS = {"couple_prank", "couple_flirt"}
 DURATION_OPTIONS = {"dur_1_20", "dur_20_60", "dur_60_120", "dur_120_plus"}
+DURATION_LABELS = {
+    "dur_1_20": {"pt": "1-20 s", "zh": "1-20 秒"},
+    "dur_20_60": {"pt": "20 s-1 min", "zh": "20 秒-1 分钟"},
+    "dur_60_120": {"pt": "1-2 min", "zh": "1-2 分钟"},
+    "dur_120_plus": {"pt": "Mais de 2 min", "zh": "2 分钟以上"},
+}
 COUPLE_TYPES = {"夫妻整蛊/冲突", "夫妻暧昧"}
 FAMILY_TYPES = {"家庭整蛊"}
 FRIEND_TYPES = {"朋友整蛊"}
@@ -605,6 +688,7 @@ def entry_signals(entry: dict[str, Any]) -> dict[str, bool]:
 def entry_matches_hard_selection(entry: dict[str, Any], selected: list[str]) -> bool:
     people = selected_axis(selected, PEOPLE_OPTIONS)
     subtype = selected_axis(selected, SUBTYPE_OPTIONS)
+    duration = selected_axis(selected, DURATION_OPTIONS)
     content_type = canonical_content_type(entry)
     if people == "couple" and content_type not in COUPLE_TYPES:
         return False
@@ -615,6 +699,8 @@ def entry_matches_hard_selection(entry: dict[str, Any], selected: list[str]) -> 
     if subtype == "couple_prank" and content_type != "夫妻整蛊/冲突":
         return False
     if subtype == "couple_flirt" and content_type != "夫妻暧昧":
+        return False
+    if duration and duration_bucket_for_entry(entry) != duration:
         return False
     return True
 
@@ -664,6 +750,8 @@ def public_entry(entry: dict[str, Any], score: int) -> dict[str, Any]:
     entry = normalized_entry(entry)
     entry_id = str(entry.get("entry_id") or "").strip()
     script_date = str(entry.get("saved_at") or entry.get("created_at") or "").strip()
+    duration_bucket = duration_bucket_for_entry(entry)
+    duration_seconds = entry_duration_seconds(entry)
     return {
         "entry_id": entry_id,
         "title": entry.get("title") or "Roteiro",
@@ -676,6 +764,10 @@ def public_entry(entry: dict[str, Any], score: int) -> dict[str, Any]:
         "cover_url": abs_url(entry.get("preview_image_url") or entry.get("thumbnail_url") or ""),
         "thumbnail_url": f"/api/creator/thumbnail/{entry_id}.webp" if entry_id else "",
         "script_date": script_date,
+        "duration_bucket": duration_bucket,
+        "duration_seconds": round(duration_seconds, 2) if duration_seconds > 0 else 0,
+        "duration_label_pt": DURATION_LABELS.get(duration_bucket, {}).get("pt", ""),
+        "duration_label_zh": DURATION_LABELS.get(duration_bucket, {}).get("zh", ""),
         "score": score,
     }
 
@@ -1038,6 +1130,8 @@ def is_admin_authed(headers: Any) -> bool:
 def public_admin_entry(entry: dict[str, Any]) -> dict[str, Any]:
     entry = normalized_entry(entry)
     entry_id = str(entry.get("entry_id") or "").strip()
+    duration_bucket = duration_bucket_for_entry(entry)
+    duration_seconds = entry_duration_seconds(entry)
     return {
         "entry_id": entry_id,
         "title": str(entry.get("title") or ""),
@@ -1050,6 +1144,10 @@ def public_admin_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "html_url": abs_url(entry.get("pt_html_url") or entry.get("html_url") or entry.get("zh_html_url")),
         "zh_html_url": abs_url(entry.get("zh_html_url") or entry.get("html_url") or entry.get("pt_html_url")),
         "created_at": str(entry.get("created_at") or entry.get("saved_at") or ""),
+        "duration_bucket": duration_bucket,
+        "duration_seconds": round(duration_seconds, 2) if duration_seconds > 0 else 0,
+        "duration_label_pt": DURATION_LABELS.get(duration_bucket, {}).get("pt", ""),
+        "duration_label_zh": DURATION_LABELS.get(duration_bucket, {}).get("zh", ""),
         "published": bool(entry.get("creator_published", True)),
         "overridden": bool(entry.get("creator_override")),
     }
@@ -1275,6 +1373,8 @@ def update_admin_entry(entry_id: str, payload: dict[str, Any]) -> dict[str, Any]
         "html_url": "html_url",
         "zh_html_url": "zh_html_url",
         "pt_html_url": "pt_html_url",
+        "duration_bucket": "duration_bucket",
+        "duration_seconds": "duration_seconds",
     }
     for incoming, target in field_map.items():
         if incoming in payload:
@@ -1424,11 +1524,11 @@ function renderScheduleFeed(){{const root=document.querySelector("#saved-feed");
 function dateKey(e){{const raw=String(e.script_date||"");const m=raw.match(/^(\\d{{4}})-(\\d{{2}})-(\\d{{2}})/);return m?`${{m[1]}}-${{m[2]}}-${{m[3]}}`:"recent"}}
 function dateLabel(key){{if(key==="recent")return lang==="zh"?"近期":"Recentes";const [y,m,d]=key.split("-");return `${{y}}.${{Number(m)}}.${{Number(d)}}`}}
 function masonryCard(e,i){{return `<button class="masonry-card" type="button" data-detail="${{esc(e.entry_id)}}"><img src="${{esc(scriptImage(e))}}" loading="lazy" alt=""><span class="masonry-title">${{esc(e.title)}}</span></button>`}}
-function card(e,i){{const s=statusOf(e.entry_id);return `<article class="script card"><div class="thumb"><img src="${{esc(scriptImage(e))}}" loading="lazy" alt=""><span>${{Math.max(78,96-Math.min(i,18))}} match</span></div><div class="body"><h3>${{esc(e.title)}}</h3><p>${{esc(e.summary)}}</p><div class="tags"><span class="tag">${{esc(ptTag(e.content_type))}}</span><span class="tag">1-3 min</span>${{s?`<span class="tag">${{esc(ptTag(s))}}</span>`:""}}</div><div class="actions"><button class="open" data-detail="${{esc(e.entry_id)}}">▷ ${{t("open")}}</button><button class="icon" data-status="${{s==="saved"?"":"saved"}}" data-entry="${{esc(e.entry_id)}}">${{s==="saved"?"✓":"♡"}}</button><button class="icon" data-status="planned" data-entry="${{esc(e.entry_id)}}">＋</button></div></div></article>`}}
+function card(e,i){{const s=statusOf(e.entry_id);return `<article class="script card"><div class="thumb"><img src="${{esc(scriptImage(e))}}" loading="lazy" alt=""><span>${{Math.max(78,96-Math.min(i,18))}} match</span></div><div class="body"><h3>${{esc(e.title)}}</h3><p>${{esc(e.summary)}}</p><div class="tags"><span class="tag">${{esc(ptTag(e.content_type))}}</span>${{durationLabel(e)?`<span class="tag">${{esc(durationLabel(e))}}</span>`:""}}${{s?`<span class="tag">${{esc(ptTag(s))}}</span>`:""}}</div><div class="actions"><button class="open" data-detail="${{esc(e.entry_id)}}">▷ ${{t("open")}}</button><button class="icon" data-status="${{s==="saved"?"":"saved"}}" data-entry="${{esc(e.entry_id)}}">${{s==="saved"?"✓":"♡"}}</button><button class="icon" data-status="planned" data-entry="${{esc(e.entry_id)}}">＋</button></div></div></article>`}}
 function renderList(sel,list){{document.querySelector(sel).innerHTML=list.length?list.map(card).join(""):`<section class="state card"><h3>${{t("empty")}}</h3><p class="lead">${{t("emptyText")}}</p><button class="primary" data-go="dashboard">${{t("navHome")}}</button></section>`}}
 function masonryHtml(list){{if(!list.length)return `<section class="state card"><h3>${{t("empty")}}</h3><p class="lead">${{t("emptyText")}}</p><button class="primary" data-go="dashboard">${{t("navHome")}}</button></section>`;const groups=new Map();list.forEach(e=>{{const key=dateKey(e);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(e)}});const keys=[...groups.keys()].sort((a,b)=>b.localeCompare(a));return keys.map(key=>`<section class="date-group"><div class="date-divider">${{esc(dateLabel(key))}}</div><div class="masonry">${{groups.get(key).map(masonryCard).join("")}}</div></section>`).join("")}}
 function renderMasonry(sel,list){{document.querySelector(sel).innerHTML=masonryHtml(list)}}
-function featuredCard(e,i){{const s=statusOf(e.entry_id);const liked=ids("saved").has(e.entry_id);const tags=[ptTag(e.content_type),"1-3 min",...(s?[ptTag(s)]:[])].filter(Boolean);const summary=String(e.summary||"").trim();return `<section class="featured-shell"><article class="featured-card"><div class="featured-media"><img src="${{esc(scriptImage(e))}}" loading="eager" alt=""><span class="featured-badge">${{lang==="zh"?"按时间推荐":"Recomendado agora"}}</span><span class="featured-score">${{i+1}}/${{entries.length}}</span></div><div class="featured-body"><h2 class="featured-title">${{esc(e.title)}}</h2><p class="featured-summary">${{esc(summary||e.content_type||"")}}</p><div class="featured-tags">${{tags.map(x=>`<span class="tag">${{esc(x)}}</span>`).join("")}}</div><div class="featured-actions"><button class="featured-icon" type="button" data-status="${{liked?"":"saved"}}" data-entry="${{esc(e.entry_id)}}" aria-label="${{t("save")}}"><span class="btn-ico">${{liked?"✓":"♡"}}</span><span>${{liked?(lang==="zh"?"已收藏":"Salvo"):(lang==="zh"?"收藏":"Salvar")}}</span></button><button class="primary" type="button" data-detail="${{esc(e.entry_id)}}"><span class="btn-ico">⌕</span><span>${{lang==="zh"?"具体查看":"Ver detalhes"}}</span></button></div><button class="featured-next" type="button" data-feature-next><span class="btn-ico">→</span><span>${{lang==="zh"?"查看下一个脚本":"Ver proximo roteiro"}}</span></button></div></article><button class="view-all-card" type="button" data-go="all-scripts"><b>${{lang==="zh"?"查看全部推荐脚本":"Ver todos os roteiros recomendados"}}</b><span>${{lang==="zh"?"打开双列瀑布流，集中浏览全部脚本。":"Abrir a lista em duas colunas para explorar tudo."}}</span></button></section>`}}
+function featuredCard(e,i){{const s=statusOf(e.entry_id);const liked=ids("saved").has(e.entry_id);const tags=[ptTag(e.content_type),durationLabel(e),...(s?[ptTag(s)]:[])].filter(Boolean);const summary=String(e.summary||"").trim();return `<section class="featured-shell"><article class="featured-card"><div class="featured-media"><img src="${{esc(scriptImage(e))}}" loading="eager" alt=""><span class="featured-badge">${{lang==="zh"?"按时间推荐":"Recomendado agora"}}</span><span class="featured-score">${{i+1}}/${{entries.length}}</span></div><div class="featured-body"><h2 class="featured-title">${{esc(e.title)}}</h2><p class="featured-summary">${{esc(summary||e.content_type||"")}}</p><div class="featured-tags">${{tags.map(x=>`<span class="tag">${{esc(x)}}</span>`).join("")}}</div><div class="featured-actions"><button class="featured-icon" type="button" data-status="${{liked?"":"saved"}}" data-entry="${{esc(e.entry_id)}}" aria-label="${{t("save")}}"><span class="btn-ico">${{liked?"✓":"♡"}}</span><span>${{liked?(lang==="zh"?"已收藏":"Salvo"):(lang==="zh"?"收藏":"Salvar")}}</span></button><button class="primary" type="button" data-detail="${{esc(e.entry_id)}}"><span class="btn-ico">⌕</span><span>${{lang==="zh"?"具体查看":"Ver detalhes"}}</span></button></div><button class="featured-next" type="button" data-feature-next><span class="btn-ico">→</span><span>${{lang==="zh"?"查看下一个脚本":"Ver proximo roteiro"}}</span></button></div></article><button class="view-all-card" type="button" data-go="all-scripts"><b>${{lang==="zh"?"查看全部推荐脚本":"Ver todos os roteiros recomendados"}}</b><span>${{lang==="zh"?"打开双列瀑布流，集中浏览全部脚本。":"Abrir a lista em duas colunas para explorar tudo."}}</span></button></section>`}}
 async function ensure(limit=48){{if(!entries.length||entriesLoadedKey!==recommendationKey()||entriesLoadedLimit<limit)await loadEntries(limit)}} async function renderDashboard(){{document.querySelector("#dashboard-feed").innerHTML=`<section class="state card"><h3>Loading...</h3></section>`;try{{await ensure(48);if(!entries.length){{renderMasonry("#dashboard-feed",entries);return}}const featuredIndex=((featuredOffset%entries.length)+entries.length)%entries.length;document.querySelector("#dashboard-feed").innerHTML=featuredCard(entries[featuredIndex],featuredIndex)}}catch(e){{document.querySelector("#dashboard-feed").innerHTML=`<section class="state card"><h3>Erro</h3></section>`}}}}
 async function renderAllScripts(){{document.querySelector("#all-title").textContent=lang==="zh"?"全部推荐脚本":"Todos os roteiros";document.querySelector("#all-feed").innerHTML=`<section class="state card"><h3>Loading...</h3></section>`;try{{await ensure(500);renderMasonry("#all-feed",entries)}}catch(e){{document.querySelector("#all-feed").innerHTML=`<section class="state card"><h3>Erro</h3></section>`}}}}
 async function loadSubmissions(){{try{{const r=await fetch(`/api/creator/submissions?_=${{Date.now()}}`);const d=await r.json();submissions=Array.isArray(d.submissions)?d.submissions:[]}}catch(e){{submissions=[]}}return submissions}}
@@ -1451,6 +1551,7 @@ function hydrateVideo(e){{if(!e.video_url)return;setTimeout(async()=>{{const box
 function scriptLoading(){{return `<section class="script-loading"><b>${{lang==="zh"?"脚本加载中请耐心等待":"Roteiro carregando, aguarde um momento"}}</b><span>${{lang==="zh"?"正在整理完整脚本内容，加载完成后会自动显示。":"Estamos preparando o roteiro completo. Ele aparecerá automaticamente."}}</span><div class="script-progress" aria-hidden="true"></div></section>`}}
 function normalizeLabel(s){{return String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[：:]/g,"").trim()}}
 function compactText(s){{return String(s||"").replace(/\s+/g," ").trim()}}
+function durationLabel(e){{if(lang==="zh")return e.duration_label_zh||{{dur_1_20:"1-20 秒",dur_20_60:"20 秒-1 分钟",dur_60_120:"1-2 分钟",dur_120_plus:"2 分钟以上"}}[e.duration_bucket]||"";return e.duration_label_pt||{{dur_1_20:"1-20 s",dur_20_60:"20 s-1 min",dur_60_120:"1-2 min",dur_120_plus:"Mais de 2 min"}}[e.duration_bucket]||""}}
 function ptTag(value){{const raw=String(value||"").trim();const key=raw.toLowerCase();const map={{"夫妻整蛊/冲突":"Pegadinha/conflito de casal","夫妻暧昧":"Ciúmes/traição de casal","家庭整蛊":"Pegadinha em família","朋友整蛊":"Pegadinha com amigos/colegas","待分类":"Pegadinha com amigos/colegas","热门":"Pegadinha com amigos/colegas","还没想好，给我热门":"Pegadinha com amigos/colegas","夫妻关系":"Pegadinha/conflito de casal","夫妻欺骗":"Pegadinha/conflito de casal","夫妻/情侣":"Pegadinha/conflito de casal","夫妻情感":"Pegadinha/conflito de casal","夫妻吵架":"Pegadinha/conflito de casal","夫妻出轨":"Ciúmes/traição de casal","夫妻好色":"Ciúmes/traição de casal","夫妻黄段子":"Ciúmes/traição de casal","夫妻算计":"Pegadinha/conflito de casal","妻管严":"Pegadinha/conflito de casal","夫妻整蛊":"Pegadinha/conflito de casal","隐瞒反转":"Pegadinha com amigos/colegas","骗局反转":"Pegadinha com amigos/colegas","整蛊恶搞":"Pegadinha com amigos/colegas","整蛊":"Pegadinha com amigos/colegas","赖账/金钱冲突":"Pegadinha com amigos/colegas","赖账":"Pegadinha com amigos/colegas","偷吃/偷懒/耍小聪明":"Pegadinha com amigos/colegas","偷奸耍滑":"Pegadinha com amigos/colegas","骗子":"Pegadinha com amigos/colegas","撬墙角":"Ciúmes/traição de casal","偷吃东西":"Pegadinha com amigos/colegas","Relacionamento de casal":"Pegadinha/conflito de casal","Conflito por dinheiro":"Pegadinha com amigos/colegas","Pegadinha":"Pegadinha com amigos/colegas","Golpe e reviravolta":"Pegadinha com amigos/colegas","Esperteza cotidiana":"Pegadinha com amigos/colegas","Popular":"Pegadinha com amigos/colegas",saved:"Salvo",planned:"Planejado",finished:"Gravado"}};return map[raw]||map[key]||raw.replace(/_/g," ")}}
 const storyboardDemoUrl="/static/storyboard_sick_wife_demo.png";
 function hasChinese(s){{return /[\u4e00-\u9fff]/.test(String(s||""))}}
@@ -1472,7 +1573,7 @@ function scriptTableRows(segs,storyboard){{const grid=storyboardGrid(segs);retur
 function insightSection(title,cards){{cards=uniqueCards(cards);if(!cards.length)return "";return `<section class="insight-section"><h3>${{esc(title)}}</h3><div class="insight-cards">${{cards.map(c=>`<article><b>${{esc(c.title)}}</b><p>${{esc(c.body)}}</p></article>`).join("")}}</div></section>`}}
 function cleanScriptHtml(raw,e){{const d=extractScriptData(raw,e);const fallbackPointCards=d.points.map((x,i)=>({{title:i===0?"Ponto-chave":"Ponto-chave "+(i+1),body:x}}));const fallbackAdaptCards=d.adaptable.map((x,i)=>({{title:i===0?"Plano de substituição":"Plano "+(i+1),body:x}}));const brief=[{{label:"Video original",value:d.original}},{{label:"Conteúdo principal",value:d.main}}].filter(x=>x.value);const segs=d.segments.slice(0,9);const storyboard=storyboardImage(e);return `<article class="script-html"><div class="clean-script"><section class="brief-list">${{brief.map(x=>`<div class="brief-card"><b>${{esc(x.label)}}</b><p>${{esc(x.value)}}</p></div>`).join("")}}</section>${{insightSection("Pontos-chave",d.pointCards.length?d.pointCards:fallbackPointCards)}}${{insightSection("Planos de substituição",d.adaptableCards.length?d.adaptableCards:fallbackAdaptCards)}}${{segs.length?`<section class="script-table-card"><div class="script-table-title">Tabela do roteiro</div><div class="script-shot-list">${{scriptTableRows(segs,storyboard)}}</div></section>`:""}}</div></article>`}}
 function renderScriptSlot(html,e){{return html?cleanScriptHtml(html,e):`<article class="script-html"><div class="clean-script"><div class="brief-card"><b>Conteúdo principal</b><p>${{esc(e.summary||"")}}</p></div></div></article>`}}
-function renderDetail(e){{const s=statusOf(e.entry_id);const liked=ids("saved").has(e.entry_id);document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><div class="detail-content">${{detailCover(e)}}<h2 class="detail-title">${{esc(ptTitle(e))}}</h2><div class="tags"><span class="tag">${{esc(ptTag(e.content_type))}}</span><span class="tag">1-3 min</span>${{s?`<span class="tag">${{esc(ptTag(s))}}</span>`:""}}</div><div class="share-box" id="share-output"></div><div id="script-html-slot">${{e.script_html?renderScriptSlot(e.script_html,e):scriptLoading()}}</div>${{videoPreview(e)}}<section class="submit"><b>${{t("submitTitle")}}</b><p class="lead">${{t("submitHint")}}</p><input type="url" data-submit-url="${{esc(e.entry_id)}}" placeholder="${{t("submitPlaceholder")}}"><button class="primary" data-submit="${{esc(e.entry_id)}}">${{t("submitButton")}}</button><div id="submit-status-${{esc(e.entry_id)}}"></div></section><div class="social-actions"><button class="social-btn" type="button" data-status="${{liked?"":"saved"}}" data-entry="${{esc(e.entry_id)}}" aria-label="${{t("save")}}">♡<span>${{liked?(lang==="zh"?"已收藏":"Salvo"):(lang==="zh"?"收藏":"Salvar")}}</span></button><button class="social-btn" type="button" data-copy-share="${{esc(e.entry_id)}}" aria-label="${{lang==="zh"?"复制分享链接":"Copiar link"}}">↗<span>${{lang==="zh"?"分享":"Compartilhar"}}</span></button></div></div>`}}
+function renderDetail(e){{const s=statusOf(e.entry_id);const liked=ids("saved").has(e.entry_id);document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><div class="detail-content">${{detailCover(e)}}<h2 class="detail-title">${{esc(ptTitle(e))}}</h2><div class="tags"><span class="tag">${{esc(ptTag(e.content_type))}}</span>${{durationLabel(e)?`<span class="tag">${{esc(durationLabel(e))}}</span>`:""}}${{s?`<span class="tag">${{esc(ptTag(s))}}</span>`:""}}</div><div class="share-box" id="share-output"></div><div id="script-html-slot">${{e.script_html?renderScriptSlot(e.script_html,e):scriptLoading()}}</div>${{videoPreview(e)}}<section class="submit"><b>${{t("submitTitle")}}</b><p class="lead">${{t("submitHint")}}</p><input type="url" data-submit-url="${{esc(e.entry_id)}}" placeholder="${{t("submitPlaceholder")}}"><button class="primary" data-submit="${{esc(e.entry_id)}}">${{t("submitButton")}}</button><div id="submit-status-${{esc(e.entry_id)}}"></div></section><div class="social-actions"><button class="social-btn" type="button" data-status="${{liked?"":"saved"}}" data-entry="${{esc(e.entry_id)}}" aria-label="${{t("save")}}">♡<span>${{liked?(lang==="zh"?"已收藏":"Salvo"):(lang==="zh"?"收藏":"Salvar")}}</span></button><button class="social-btn" type="button" data-copy-share="${{esc(e.entry_id)}}" aria-label="${{lang==="zh"?"复制分享链接":"Copiar link"}}">↗<span>${{lang==="zh"?"分享":"Compartilhar"}}</span></button></div></div>`}}
 function loadDetailHtml(e){{if(e.script_html)return;setTimeout(async()=>{{try{{const html=await fetchScriptHtml(e.entry_id);const slot=document.querySelector("#script-html-slot");if(slot)slot.innerHTML=renderScriptSlot(html,e)}}catch(err){{const slot=document.querySelector("#script-html-slot");if(slot)slot.innerHTML=renderScriptSlot("",{{...e,summary:e.summary||err.message}})}}}},300)}}
 async function openDetail(id){{const modal=document.querySelector("#modal");modal.classList.add("active");const local=entry(id);if(local){{renderDetail(local);hydrateVideo(local);loadDetailHtml(local);return}}document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><section class="state card"><h3>${{lang==="zh"?"正在加载脚本..." :"Carregando roteiro..."}}</h3></section>`;try{{const e=await fetchScript(id);renderDetail(e);hydrateVideo(e);loadDetailHtml(e)}}catch(err){{document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><section class="state card"><h3>${{lang==="zh"?"脚本加载失败":"Falha ao carregar"}}</h3><p>${{esc(err.message)}}</p></section>`}}}}
 async function submitVideo(id){{const input=document.querySelector(`[data-submit-url="${{id}}"]`);const status=document.querySelector(`#submit-status-${{id}}`);const video_url=String(input?.value||"").trim();if(!video_url){{status.textContent=t("submitError");return}}status.textContent=lang==="zh"?"提交中...":"Enviando...";try{{const r=await fetch("/api/creator/submissions",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{entry_id:id,video_url,creator_id:"creator"}})}});if(!r.ok)throw new Error();status.textContent=t("submitOk");await loadSubmissions();setStatus(id,"finished");savedTab="finished"}}catch(e){{status.textContent=t("submitError")}}}}
