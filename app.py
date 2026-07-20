@@ -134,6 +134,10 @@ def apply_entry_override(entry: dict[str, Any], override: dict[str, Any] | None)
         "html_url",
         "zh_html_url",
         "pt_html_url",
+        "duration_seconds",
+        "duration_bucket",
+        "duration_label_pt",
+        "duration_label_zh",
     ]:
         if key in override:
             item[key] = override.get(key)
