@@ -1561,20 +1561,23 @@ def public_creator_profile(
     if not isinstance(submissions, list):
         submissions = []
     account = find_account(str(profile.get("account_id") or profile.get("phone") or profile.get("kwai_id") or profile.get("uid") or ""))
-    account_public = public_account(account, include_state=False) if account else {}
-    if account_public:
-        account_public = {key: account_public.get(key) for key in [
-            "account_id",
-            "phone",
-            "kwai_id",
-            "uid",
-            "display_name",
-            "status",
-            "last_login_at",
-            "saved_count",
-            "scheduled_count",
-            "submission_count",
-        ]}
+    account_public: dict[str, Any] = {}
+    if account:
+        state = account.get("state") if isinstance(account.get("state"), dict) else {}
+        workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
+        schedule = workspace.get("schedule") if isinstance(workspace.get("schedule"), dict) else {}
+        account_public = {
+            "account_id": str(account.get("account_id") or ""),
+            "phone": str(account.get("phone") or account.get("account_id") or ""),
+            "kwai_id": str(account.get("kwai_id") or ""),
+            "uid": str(account.get("uid") or ""),
+            "display_name": str(account.get("display_name") or account.get("account_id") or ""),
+            "status": str(account.get("status") or "active"),
+            "last_login_at": str(account.get("last_login_at") or ""),
+            "saved_count": len(workspace.get("saved") or []),
+            "scheduled_count": sum(len(v) for v in schedule.values() if isinstance(v, list)),
+            "submission_count": 0,
+        }
     creator_keys = {
         normalize_account_key(profile.get("profile_id") or ""),
         normalize_account_key(profile.get("account_id") or ""),
@@ -1594,6 +1597,8 @@ def public_creator_profile(
             or (creator_kwai and submission_kwai_id(item) == creator_kwai)
         )
     ]
+    if account_public:
+        account_public["submission_count"] = len(matched_submissions)
     submission_by_script: dict[str, list[dict[str, Any]]] = {}
     for item in matched_submissions:
         submission_by_script.setdefault(str(item.get("entry_id") or ""), []).append(item)
