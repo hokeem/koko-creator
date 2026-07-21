@@ -1522,10 +1522,11 @@ def category_tokens(categories: list[str]) -> set[str]:
 
 def scripts_for_creator(categories: list[str], limit: int = 80, entries: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     tokens = category_tokens(categories)
+    if not tokens:
+        return []
     scored: list[tuple[int, dict[str, Any]]] = []
     source_entries = entries if entries is not None else load_entries()
     for idx, entry in enumerate(source_entries):
-        public = public_entry(entry, 0)
         text = " ".join([
             str(entry.get("content_type") or ""),
             str(entry.get("title") or ""),
@@ -1533,13 +1534,12 @@ def scripts_for_creator(categories: list[str], limit: int = 80, entries: list[di
             str(entry.get("content_type_reasoning") or ""),
         ])
         score = 0
-        if not tokens:
-            score += 20
         for token in tokens:
             if token and token in text:
                 score += 18 if token == str(entry.get("content_type") or "") else 8
         score += max(0, 12 - min(idx, 12))
         if score > 0:
+            public = public_entry(entry, 0)
             public["match_score"] = score
             public["share_url"] = f"/script/{public['entry_id']}"
             scored.append((score, public))
