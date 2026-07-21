@@ -1520,10 +1520,11 @@ def category_tokens(categories: list[str]) -> set[str]:
     return {token for token in tokens if token}
 
 
-def scripts_for_creator(categories: list[str], limit: int = 80) -> list[dict[str, Any]]:
+def scripts_for_creator(categories: list[str], limit: int = 80, entries: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     tokens = category_tokens(categories)
     scored: list[tuple[int, dict[str, Any]]] = []
-    for idx, entry in enumerate(load_entries()):
+    source_entries = entries if entries is not None else load_entries()
+    for idx, entry in enumerate(source_entries):
         public = public_entry(entry, 0)
         text = " ".join([
             str(entry.get("content_type") or ""),
@@ -1546,10 +1547,16 @@ def scripts_for_creator(categories: list[str], limit: int = 80) -> list[dict[str
     return [entry for _, entry in scored[:limit]]
 
 
-def public_creator_profile(profile: dict[str, Any], include_scripts: bool = True) -> dict[str, Any]:
+def public_creator_profile(
+    profile: dict[str, Any],
+    include_scripts: bool = True,
+    *,
+    entries: list[dict[str, Any]] | None = None,
+    submissions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     categories = [str(item or "").strip() for item in profile.get("categories") or [] if str(item or "").strip()]
-    scripts = scripts_for_creator(categories, 80) if include_scripts else []
-    submissions = read_json_file(SUBMISSIONS_FILE, [])
+    scripts = scripts_for_creator(categories, 80, entries=entries) if include_scripts else []
+    submissions = submissions if submissions is not None else read_json_file(SUBMISSIONS_FILE, [])
     if not isinstance(submissions, list):
         submissions = []
     account = find_account(str(profile.get("account_id") or profile.get("phone") or profile.get("kwai_id") or profile.get("uid") or ""))
@@ -1561,6 +1568,19 @@ def public_creator_profile(profile: dict[str, Any], include_scripts: bool = True
         normalize_account_key(profile.get("uid") or ""),
         normalize_kwai_id(profile.get("kwai_id") or ""),
     }
+
+
+def public_creator_profiles() -> list[dict[str, Any]]:
+    entries = load_entries()
+    submissions = read_json_file(SUBMISSIONS_FILE, [])
+    if not isinstance(submissions, list):
+        submissions = []
+    profiles = [
+        public_creator_profile(item, entries=entries, submissions=submissions)
+        for item in load_creator_profiles()
+    ]
+    profiles.sort(key=lambda item: (int(item.get("submission_count") or 0), int(item.get("returned_script_count") or 0), str(item.get("updated_at") or "")), reverse=True)
+    return profiles
     creator_keys.update(account_aliases(account) if account else set())
     creator_keys = {item for item in creator_keys if item}
     creator_kwai = normalize_kwai_id(profile.get("kwai_id") or "")
@@ -2111,8 +2131,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/admin/creators":
             if not self.require_admin():
                 return
-            profiles = [public_creator_profile(item) for item in load_creator_profiles()]
-            profiles.sort(key=lambda item: (int(item.get("submission_count") or 0), int(item.get("returned_script_count") or 0), str(item.get("updated_at") or "")), reverse=True)
+            profiles = public_creator_profiles()
             self.send_json({"creators": profiles, "total": len(profiles), "categories": content_type_labels()})
             return
         creator_match = re.fullmatch(r"/api/admin/creators/([0-9a-f]{32})", parsed.path)
