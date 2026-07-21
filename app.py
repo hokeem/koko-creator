@@ -1569,18 +1569,6 @@ def public_creator_profile(
         normalize_kwai_id(profile.get("kwai_id") or ""),
     }
 
-
-def public_creator_profiles() -> list[dict[str, Any]]:
-    entries = load_entries()
-    submissions = read_json_file(SUBMISSIONS_FILE, [])
-    if not isinstance(submissions, list):
-        submissions = []
-    profiles = [
-        public_creator_profile(item, entries=entries, submissions=submissions)
-        for item in load_creator_profiles()
-    ]
-    profiles.sort(key=lambda item: (int(item.get("submission_count") or 0), int(item.get("returned_script_count") or 0), str(item.get("updated_at") or "")), reverse=True)
-    return profiles
     creator_keys.update(account_aliases(account) if account else set())
     creator_keys = {item for item in creator_keys if item}
     creator_kwai = normalize_kwai_id(profile.get("kwai_id") or "")
@@ -1628,6 +1616,19 @@ def public_creator_profiles() -> list[dict[str, Any]]:
         "folded_count": max(0, len(scripts) - 6),
         "submissions": matched_submissions or fake_submissions,
     }
+
+
+def public_creator_profiles() -> list[dict[str, Any]]:
+    entries = load_entries()
+    submissions = read_json_file(SUBMISSIONS_FILE, [])
+    if not isinstance(submissions, list):
+        submissions = []
+    profiles = [
+        public_creator_profile(item, entries=entries, submissions=submissions)
+        for item in load_creator_profiles()
+    ]
+    profiles.sort(key=lambda item: (int(item.get("submission_count") or 0), int(item.get("returned_script_count") or 0), str(item.get("updated_at") or "")), reverse=True)
+    return profiles
 
 
 def create_or_update_creator_profile(payload: dict[str, Any], profile_id: str | None = None) -> dict[str, Any]:
