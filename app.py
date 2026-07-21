@@ -1534,11 +1534,15 @@ def category_tokens(categories: list[str]) -> set[str]:
     return {token for token in tokens if token}
 
 
-def scripts_for_creator(categories: list[str], limit: int = 80, entries: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+def ranked_scripts_for_creator(
+    categories: list[str],
+    limit: int = 80,
+    entries: list[dict[str, Any]] | None = None,
+) -> tuple[int, list[dict[str, Any]]]:
     tokens = category_tokens(categories)
     if not tokens:
-        return []
-    scored: list[tuple[int, dict[str, Any]]] = []
+        return 0, []
+    scored: list[tuple[int, int, dict[str, Any]]] = []
     source_entries = entries if entries is not None else load_entries()
     for idx, entry in enumerate(source_entries):
         text = " ".join([
@@ -1553,12 +1557,19 @@ def scripts_for_creator(categories: list[str], limit: int = 80, entries: list[di
                 score += 18 if token == str(entry.get("content_type") or "") else 8
         score += max(0, 12 - min(idx, 12))
         if score > 0:
-            public = public_entry(entry, 0)
-            public["match_score"] = score
-            public["share_url"] = f"/script/{public['entry_id']}"
-            scored.append((score, public))
+            scored.append((score, idx, entry))
     scored.sort(key=lambda pair: pair[0], reverse=True)
-    return [entry for _, entry in scored[:limit]]
+    public_scripts: list[dict[str, Any]] = []
+    for score, _, entry in scored[:max(0, limit)]:
+        public = public_entry(entry, 0)
+        public["match_score"] = score
+        public["share_url"] = f"/script/{public['entry_id']}"
+        public_scripts.append(public)
+    return len(scored), public_scripts
+
+
+def scripts_for_creator(categories: list[str], limit: int = 80, entries: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    return ranked_scripts_for_creator(categories, limit, entries=entries)[1]
 
 
 def public_creator_profile(
@@ -1570,7 +1581,8 @@ def public_creator_profile(
     script_preview_limit: int | None = None,
 ) -> dict[str, Any]:
     categories = [str(item or "").strip() for item in profile.get("categories") or [] if str(item or "").strip()]
-    scripts = scripts_for_creator(categories, 80, entries=entries) if include_scripts else []
+    script_limit = 80 if script_preview_limit is None else max(0, script_preview_limit)
+    script_total, scripts = ranked_scripts_for_creator(categories, script_limit, entries=entries) if include_scripts else (0, [])
     submissions = submissions if submissions is not None else read_json_file(SUBMISSIONS_FILE, [])
     if not isinstance(submissions, list):
         submissions = []
@@ -1643,12 +1655,12 @@ def public_creator_profile(
         "creator_type": profile.get("creator_type") if isinstance(profile.get("creator_type"), dict) else {},
         "cooperation_level": str(profile.get("cooperation_level") or "待标注"),
         "creator_description": str(profile.get("creator_description") or profile.get("notes") or ""),
-        "fed_script_count": len(scripts),
+        "fed_script_count": script_total,
         "returned_script_count": len({str(item.get("entry_id") or "") for item in matched_submissions if isinstance(item, dict)}),
         "submission_count": len(matched_submissions),
         "matched_scripts": visible_scripts,
         "priority_scripts": visible_scripts[:priority_limit],
-        "folded_count": max(0, len(scripts) - priority_limit),
+        "folded_count": max(0, script_total - priority_limit),
         "submissions": matched_submissions or fake_submissions,
     }
 
