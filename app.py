@@ -1562,6 +1562,19 @@ def public_creator_profile(
         submissions = []
     account = find_account(str(profile.get("account_id") or profile.get("phone") or profile.get("kwai_id") or profile.get("uid") or ""))
     account_public = public_account(account, include_state=False) if account else {}
+    if account_public:
+        account_public = {key: account_public.get(key) for key in [
+            "account_id",
+            "phone",
+            "kwai_id",
+            "uid",
+            "display_name",
+            "status",
+            "last_login_at",
+            "saved_count",
+            "scheduled_count",
+            "submission_count",
+        ]}
     creator_keys = {
         normalize_account_key(profile.get("profile_id") or ""),
         normalize_account_key(profile.get("account_id") or ""),
