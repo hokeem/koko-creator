@@ -1553,6 +1553,7 @@ def public_creator_profile(
     *,
     entries: list[dict[str, Any]] | None = None,
     submissions: list[dict[str, Any]] | None = None,
+    script_preview_limit: int | None = None,
 ) -> dict[str, Any]:
     categories = [str(item or "").strip() for item in profile.get("categories") or [] if str(item or "").strip()]
     scripts = scripts_for_creator(categories, 80, entries=entries) if include_scripts else []
@@ -1560,7 +1561,7 @@ def public_creator_profile(
     if not isinstance(submissions, list):
         submissions = []
     account = find_account(str(profile.get("account_id") or profile.get("phone") or profile.get("kwai_id") or profile.get("uid") or ""))
-    account_public = public_account(account, include_state=True) if account else {}
+    account_public = public_account(account, include_state=False) if account else {}
     creator_keys = {
         normalize_account_key(profile.get("profile_id") or ""),
         normalize_account_key(profile.get("account_id") or ""),
@@ -1598,6 +1599,8 @@ def public_creator_profile(
             "status": "placeholder",
             "created_at": "",
         }]
+    visible_scripts = scripts if script_preview_limit is None else scripts[:max(0, script_preview_limit)]
+    priority_limit = 6 if script_preview_limit is None else min(2, len(visible_scripts))
     return {
         **profile,
         "categories": categories,
@@ -1611,9 +1614,9 @@ def public_creator_profile(
         "fed_script_count": len(scripts),
         "returned_script_count": len({str(item.get("entry_id") or "") for item in matched_submissions if isinstance(item, dict)}),
         "submission_count": len(matched_submissions),
-        "matched_scripts": scripts,
-        "priority_scripts": scripts[:6],
-        "folded_count": max(0, len(scripts) - 6),
+        "matched_scripts": visible_scripts,
+        "priority_scripts": visible_scripts[:priority_limit],
+        "folded_count": max(0, len(scripts) - priority_limit),
         "submissions": matched_submissions or fake_submissions,
     }
 
@@ -1624,7 +1627,7 @@ def public_creator_profiles() -> list[dict[str, Any]]:
     if not isinstance(submissions, list):
         submissions = []
     profiles = [
-        public_creator_profile(item, entries=entries, submissions=submissions)
+        public_creator_profile(item, entries=entries, submissions=submissions, script_preview_limit=2)
         for item in load_creator_profiles()
     ]
     profiles.sort(key=lambda item: (int(item.get("submission_count") or 0), int(item.get("returned_script_count") or 0), str(item.get("updated_at") or "")), reverse=True)
