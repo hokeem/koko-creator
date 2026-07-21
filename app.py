@@ -1005,6 +1005,7 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
     meta = link_metadata(video_url)
     fallback_thumb = f"/api/creator/thumbnail/{entry_id}.webp"
     creator_id = normalize_account_key(str(payload.get("creator_id") or "local_creator"))
+    detected_kwai_id = submission_kwai_id({"video_url": video_url})
     submission = {
         "submission_id": uuid4().hex,
         "entry_id": entry_id,
@@ -1013,6 +1014,7 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
         "submitted_title": meta.get("title") or str(entry.get("title") or ""),
         "thumbnail_url": meta.get("image") or fallback_thumb,
         "creator_id": creator_id or "local_creator",
+        "detected_kwai_id": detected_kwai_id,
         "video_url": video_url,
         "status": "pending_review",
         "created_at": now_iso(),
@@ -1157,6 +1159,36 @@ def normalize_account_key(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z_@.-]+", "", str(value or "").strip())[:80]
 
 
+def normalize_phone(value: str) -> str:
+    return re.sub(r"\D+", "", str(value or ""))[:40]
+
+
+def normalize_kwai_id(value: str) -> str:
+    text = str(value or "").strip()
+    text = text[1:] if text.startswith("@") else text
+    return re.sub(r"[^0-9A-Za-z_.-]+", "", text)[:120]
+
+
+def account_aliases(account: dict[str, Any]) -> set[str]:
+    aliases: set[str] = set()
+    for key in ["account_id", "phone", "kwai_id", "uid"]:
+        raw = str(account.get(key) or "").strip()
+        for value in [raw, normalize_phone(raw), normalize_kwai_id(raw)]:
+            clean = normalize_account_key(value)
+            if clean:
+                aliases.add(clean)
+    for raw in account.get("login_aliases") or []:
+        for value in [str(raw or ""), normalize_phone(str(raw or "")), normalize_kwai_id(str(raw or ""))]:
+            clean = normalize_account_key(value)
+            if clean:
+                aliases.add(clean)
+    return aliases
+
+
+def submission_kwai_id(submission: dict[str, Any]) -> str:
+    return normalize_kwai_id(submission.get("detected_kwai_id") or kwai_handle_from_url(str(submission.get("video_url") or "")))
+
+
 def account_signature(account_id: str) -> str:
     secret = (ADMIN_PASSWORD or "koko").encode("utf-8")
     return hmac.new(secret, account_id.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -1214,6 +1246,9 @@ def public_account(account: dict[str, Any], *, include_state: bool = False) -> d
     payload = {
         "account_id": account_id,
         "phone": str(account.get("phone") or account_id),
+        "kwai_id": str(account.get("kwai_id") or ""),
+        "uid": str(account.get("uid") or ""),
+        "login_aliases": sorted(account_aliases(account)),
         "display_name": str(account.get("display_name") or account_id),
         "status": str(account.get("status") or "active"),
         "created_at": str(account.get("created_at") or ""),
@@ -1231,29 +1266,54 @@ def public_account(account: dict[str, Any], *, include_state: bool = False) -> d
 
 def find_account(account_id: str) -> dict[str, Any] | None:
     target = normalize_account_key(account_id)
+    phone_target = normalize_phone(account_id)
+    kwai_target = normalize_kwai_id(account_id)
     for account in load_accounts():
-        if str(account.get("account_id") or "") == target:
+        aliases = account_aliases(account)
+        if target in aliases or (phone_target and phone_target in aliases) or (kwai_target and kwai_target in aliases):
             return account
     return None
 
 
-def upsert_account(account_id: str, *, source: str = "admin", display_name: str = "") -> dict[str, Any]:
-    clean = normalize_account_key(account_id)
+def upsert_account(
+    account_id: str,
+    *,
+    source: str = "admin",
+    display_name: str = "",
+    phone: str = "",
+    kwai_id: str = "",
+    uid: str = "",
+) -> dict[str, Any]:
+    clean = normalize_account_key(account_id or phone or kwai_id or uid)
     if not clean:
         raise ValueError("账号只能包含数字、字母、下划线、@、点或短横线。")
+    phone_clean = normalize_phone(phone or account_id)
+    kwai_clean = normalize_kwai_id(kwai_id)
+    uid_clean = normalize_account_key(uid)
+    login_aliases = sorted({item for item in [clean, phone_clean, kwai_clean, uid_clean] if item})
     accounts = load_accounts()
     now = now_iso()
     for idx, account in enumerate(accounts):
-        if str(account.get("account_id") or "") == clean:
+        if clean in account_aliases(account) or any(alias in account_aliases(account) for alias in login_aliases):
             account["status"] = str(account.get("status") or "active")
             account["display_name"] = display_name or str(account.get("display_name") or clean)
+            if phone_clean:
+                account["phone"] = phone_clean
+            if kwai_clean:
+                account["kwai_id"] = kwai_clean
+            if uid_clean:
+                account["uid"] = uid_clean
+            account["login_aliases"] = sorted(account_aliases(account).union(login_aliases))
             account["updated_at"] = now
             accounts[idx] = account
             save_accounts(accounts)
             return public_account(account, include_state=True)
     account = {
         "account_id": clean,
-        "phone": clean,
+        "phone": phone_clean or clean,
+        "kwai_id": kwai_clean,
+        "uid": uid_clean,
+        "login_aliases": login_aliases,
         "display_name": display_name or clean,
         "status": "active",
         "created_at": now,
@@ -1437,11 +1497,32 @@ def public_creator_profile(profile: dict[str, Any], include_scripts: bool = True
     submissions = read_json_file(SUBMISSIONS_FILE, [])
     if not isinstance(submissions, list):
         submissions = []
-    creator_keys = {str(profile.get("profile_id") or ""), str(profile.get("kwai_id") or "")}
+    account = find_account(str(profile.get("account_id") or profile.get("phone") or profile.get("kwai_id") or profile.get("uid") or ""))
+    account_public = public_account(account, include_state=True) if account else {}
+    creator_keys = {
+        normalize_account_key(profile.get("profile_id") or ""),
+        normalize_account_key(profile.get("account_id") or ""),
+        normalize_account_key(profile.get("phone") or ""),
+        normalize_account_key(profile.get("uid") or ""),
+        normalize_kwai_id(profile.get("kwai_id") or ""),
+    }
+    creator_keys.update(account_aliases(account) if account else set())
+    creator_keys = {item for item in creator_keys if item}
+    creator_kwai = normalize_kwai_id(profile.get("kwai_id") or "")
     matched_submissions = [
         item for item in submissions
-        if isinstance(item, dict) and str(item.get("creator_id") or "") in creator_keys
+        if isinstance(item, dict)
+        and (
+            normalize_account_key(item.get("creator_id") or "") in creator_keys
+            or (creator_kwai and submission_kwai_id(item) == creator_kwai)
+        )
     ]
+    submission_by_script: dict[str, list[dict[str, Any]]] = {}
+    for item in matched_submissions:
+        submission_by_script.setdefault(str(item.get("entry_id") or ""), []).append(item)
+    for script in scripts:
+        script["submission_count"] = len(submission_by_script.get(str(script.get("entry_id") or ""), []))
+        script["submissions"] = submission_by_script.get(str(script.get("entry_id") or ""), [])[:20]
     fake_submissions = []
     if not matched_submissions and scripts:
         fake_submissions = [{
@@ -1457,6 +1538,16 @@ def public_creator_profile(profile: dict[str, Any], include_scripts: bool = True
     return {
         **profile,
         "categories": categories,
+        "account": account_public,
+        "account_id": str(profile.get("account_id") or account_public.get("account_id") or ""),
+        "phone": str(profile.get("phone") or account_public.get("phone") or ""),
+        "uid": str(profile.get("uid") or account_public.get("uid") or ""),
+        "creator_type": profile.get("creator_type") if isinstance(profile.get("creator_type"), dict) else {},
+        "cooperation_level": str(profile.get("cooperation_level") or "待标注"),
+        "creator_description": str(profile.get("creator_description") or profile.get("notes") or ""),
+        "fed_script_count": len(scripts),
+        "returned_script_count": len({str(item.get("entry_id") or "") for item in matched_submissions if isinstance(item, dict)}),
+        "submission_count": len(matched_submissions),
         "matched_scripts": scripts,
         "priority_scripts": scripts[:6],
         "folded_count": max(0, len(scripts) - 6),
@@ -1472,22 +1563,62 @@ def create_or_update_creator_profile(payload: dict[str, Any], profile_id: str | 
     kwai_url = normalize_kwai_url(str(payload.get("kwai_url") or payload.get("url") or "").strip())
     if not kwai_url:
         raise ValueError("请输入 Kwai 作者主页链接。")
-    fetched = fetch_kwai_profile(kwai_url)
+    fetched: dict[str, Any] = {}
+    if not payload.get("skip_fetch"):
+        try:
+            fetched = fetch_kwai_profile(kwai_url)
+        except Exception:
+            fetched = {}
+    provided_kwai_id = normalize_kwai_id(payload.get("kwai_id") or fetched.get("kwai_id") or kwai_handle_from_url(kwai_url))
+    provided_phone = normalize_phone(payload.get("phone") or "")
+    provided_uid = normalize_account_key(str(payload.get("uid") or ""))
+    display_name = str(payload.get("display_name") or payload.get("name") or fetched.get("name") or provided_kwai_id or provided_phone or provided_uid or "Kwai creator").strip()
+    account_public = upsert_account(
+        str(payload.get("account_id") or provided_phone or provided_kwai_id or provided_uid or ""),
+        source="creator_profile",
+        display_name=display_name,
+        phone=provided_phone,
+        kwai_id=provided_kwai_id,
+        uid=provided_uid,
+    )
     profiles = load_creator_profiles()
     existing_index = -1
     for idx, item in enumerate(profiles):
         if profile_id and str(item.get("profile_id") or "") == profile_id:
             existing_index = idx
             break
-        if not profile_id and str(item.get("kwai_url") or "") == kwai_url:
+        if not profile_id and (
+            str(item.get("kwai_url") or "") == kwai_url
+            or (provided_uid and str(item.get("uid") or "") == provided_uid)
+            or (provided_kwai_id and normalize_kwai_id(item.get("kwai_id") or "") == provided_kwai_id)
+        ):
             existing_index = idx
             break
     base = profiles[existing_index] if existing_index >= 0 else {}
+    creator_type = base.get("creator_type") if isinstance(base.get("creator_type"), dict) else {}
+    incoming_creator_type = payload.get("creator_type") if isinstance(payload.get("creator_type"), dict) else {}
+    creator_type = {**creator_type, **incoming_creator_type}
+    for field in ["identity", "location"]:
+        value = str(payload.get(field) or payload.get(f"creator_{field}") or "").strip()
+        if value:
+            creator_type[field] = value
     profile = {
         **base,
         **fetched,
         "profile_id": str(base.get("profile_id") or profile_id or uuid4().hex),
+        "account_id": str(account_public.get("account_id") or ""),
+        "phone": provided_phone or str(base.get("phone") or account_public.get("phone") or ""),
+        "uid": provided_uid or str(base.get("uid") or account_public.get("uid") or ""),
+        "kwai_id": provided_kwai_id or str(base.get("kwai_id") or ""),
+        "name": display_name,
+        "avatar_url": str(payload.get("avatar_url") or fetched.get("avatar_url") or base.get("avatar_url") or ""),
+        "followers": str(payload.get("followers") or fetched.get("followers") or base.get("followers") or ""),
+        "likes": str(payload.get("likes") or payload.get("likes_count") or base.get("likes") or ""),
+        "favorites": str(payload.get("favorites") or payload.get("favorites_count") or base.get("favorites") or ""),
         "categories": categories,
+        "creator_type": creator_type,
+        "cooperation_level": str(payload.get("cooperation_level") or base.get("cooperation_level") or "待标注").strip(),
+        "creator_description": str(payload.get("creator_description") or payload.get("description") or base.get("creator_description") or "").strip(),
         "notes": str(payload.get("notes") or base.get("notes") or "").strip(),
         "updated_at": now_iso(),
         "created_at": str(base.get("created_at") or now_iso()),
@@ -1507,6 +1638,41 @@ def delete_creator_profile(profile_id: str) -> bool:
         return False
     save_creator_profiles(next_profiles)
     return True
+
+
+def import_creator_profiles(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_creators = payload.get("creators")
+    if not isinstance(raw_creators, list):
+        raise ValueError("creators must be a list.")
+    results: list[dict[str, Any]] = []
+    imported = 0
+    failed = 0
+    for idx, item in enumerate(raw_creators, start=1):
+        if not isinstance(item, dict):
+            failed += 1
+            results.append({"row": idx, "status": "failed", "error": "Invalid creator row."})
+            continue
+        try:
+            creator = create_or_update_creator_profile({**item, "skip_fetch": bool(payload.get("skip_fetch", True))})
+            imported += 1
+            results.append({
+                "row": idx,
+                "status": "imported",
+                "profile_id": creator.get("profile_id"),
+                "account_id": creator.get("account_id"),
+                "kwai_id": creator.get("kwai_id"),
+                "name": creator.get("name"),
+                "submission_count": creator.get("submission_count", 0),
+            })
+        except Exception as exc:
+            failed += 1
+            results.append({
+                "row": idx,
+                "status": "failed",
+                "kwai_url": item.get("kwai_url") or item.get("url") or "",
+                "error": str(exc),
+            })
+    return {"ok": failed == 0, "imported": imported, "failed": failed, "total": len(raw_creators), "results": results}
 
 
 def invalidate_entry_cache(entry_id: str) -> None:
@@ -1891,6 +2057,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.require_admin():
                 return
             profiles = [public_creator_profile(item) for item in load_creator_profiles()]
+            profiles.sort(key=lambda item: (int(item.get("submission_count") or 0), int(item.get("returned_script_count") or 0), str(item.get("updated_at") or "")), reverse=True)
             self.send_json({"creators": profiles, "total": len(profiles), "categories": content_type_labels()})
             return
         creator_match = re.fullmatch(r"/api/admin/creators/([0-9a-f]{32})", parsed.path)
@@ -2122,6 +2289,15 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
             return
+        if parsed.path == "/api/admin/creators/import":
+            if not self.require_admin():
+                return
+            try:
+                result = import_creator_profiles(self.read_body())
+                self.send_json(result, status=201 if result.get("imported") else 400)
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+            return
         if parsed.path == "/api/admin/accounts":
             if not self.require_admin():
                 return
@@ -2130,6 +2306,9 @@ class Handler(BaseHTTPRequestHandler):
                 account = upsert_account(
                     str(payload.get("account") or payload.get("phone") or payload.get("account_id") or ""),
                     display_name=str(payload.get("display_name") or ""),
+                    phone=str(payload.get("phone") or ""),
+                    kwai_id=str(payload.get("kwai_id") or ""),
+                    uid=str(payload.get("uid") or ""),
                 )
                 self.send_json({"ok": True, "account": account}, status=201)
             except Exception as exc:
