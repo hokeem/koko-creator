@@ -1005,7 +1005,7 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
     meta = link_metadata(video_url)
     fallback_thumb = f"/api/creator/thumbnail/{entry_id}.webp"
     creator_id = normalize_account_key(str(payload.get("creator_id") or "local_creator"))
-    detected_kwai_id = submission_kwai_id({"video_url": video_url})
+    detected_kwai_id = resolve_kwai_id_from_video_link(video_url, timeout=10)
     submission = {
         "submission_id": uuid4().hex,
         "entry_id": entry_id,
@@ -1025,6 +1025,43 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
     submissions.insert(0, submission)
     write_json_atomic(SUBMISSIONS_FILE, submissions[:1000])
     return submission
+
+
+def backfill_submission_creators(limit: int = 200) -> dict[str, Any]:
+    submissions = read_json_file(SUBMISSIONS_FILE, [])
+    if not isinstance(submissions, list):
+        submissions = []
+    checked = 0
+    updated = 0
+    results: list[dict[str, Any]] = []
+    for idx, item in enumerate(submissions):
+        if checked >= limit:
+            break
+        if not isinstance(item, dict):
+            continue
+        if normalize_kwai_id(item.get("detected_kwai_id") or ""):
+            continue
+        video_url = str(item.get("video_url") or "").strip()
+        if not video_url:
+            continue
+        checked += 1
+        detected = resolve_kwai_id_from_video_link(video_url, timeout=12)
+        result = {
+            "submission_id": item.get("submission_id"),
+            "video_url": video_url,
+            "detected_kwai_id": detected,
+            "updated": False,
+        }
+        if detected:
+            item["detected_kwai_id"] = detected
+            item["matched_at"] = now_iso()
+            submissions[idx] = item
+            updated += 1
+            result["updated"] = True
+        results.append(result)
+    if updated:
+        write_json_atomic(SUBMISSIONS_FILE, submissions[:1000])
+    return {"ok": True, "checked": checked, "updated": updated, "total": len(submissions), "results": results}
 
 
 
@@ -1187,6 +1224,24 @@ def account_aliases(account: dict[str, Any]) -> set[str]:
 
 def submission_kwai_id(submission: dict[str, Any]) -> str:
     return normalize_kwai_id(submission.get("detected_kwai_id") or kwai_handle_from_url(str(submission.get("video_url") or "")))
+
+
+def resolve_kwai_id_from_video_link(url: str, timeout: int = 12) -> str:
+    direct = normalize_kwai_id(kwai_handle_from_url(url))
+    if direct:
+        return direct
+    try:
+        req = urllib.request.Request(str(url or ""), headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            final_url = response.geturl()
+            raw = response.read(120_000).decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+    for source in [final_url, raw]:
+        match = re.search(r"/@([^/?#]+)/video/", source) or re.search(r"authorKwaiId=([^&#\"']+)", source)
+        if match:
+            return normalize_kwai_id(urllib.parse.unquote(match.group(1)))
+    return ""
 
 
 def account_signature(account_id: str) -> str:
@@ -2311,6 +2366,16 @@ class Handler(BaseHTTPRequestHandler):
                     uid=str(payload.get("uid") or ""),
                 )
                 self.send_json({"ok": True, "account": account}, status=201)
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+            return
+        if parsed.path == "/api/admin/submissions/backfill-creators":
+            if not self.require_admin():
+                return
+            try:
+                payload = self.read_body()
+                limit = max(1, min(1000, int(payload.get("limit") or 200)))
+                self.send_json(backfill_submission_creators(limit), status=200)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
             return
