@@ -1666,16 +1666,56 @@ def public_creator_profile(
 
 
 def public_creator_profiles() -> list[dict[str, Any]]:
-    entries = load_entries()
     submissions = read_json_file(SUBMISSIONS_FILE, [])
     if not isinstance(submissions, list):
         submissions = []
     profiles = [
-        public_creator_profile(item, entries=entries, submissions=submissions, script_preview_limit=2)
+        public_creator_profile(item, include_scripts=False, submissions=submissions, script_preview_limit=0)
         for item in load_creator_profiles()
     ]
     profiles.sort(key=lambda item: (int(item.get("submission_count") or 0), int(item.get("returned_script_count") or 0), str(item.get("updated_at") or "")), reverse=True)
     return profiles
+
+
+def creator_recommendations_for_profile(profile_id: str, limit: int = 5) -> dict[str, Any] | None:
+    profile = next((item for item in load_creator_profiles() if str(item.get("profile_id") or "") == profile_id), None)
+    if not profile:
+        return None
+    categories = [str(item or "").strip() for item in profile.get("categories") or [] if str(item or "").strip()]
+    total, scripts = ranked_scripts_for_creator(categories, max(1, min(50, limit)))
+    submissions = read_json_file(SUBMISSIONS_FILE, [])
+    if not isinstance(submissions, list):
+        submissions = []
+    creator_kwai = normalize_kwai_id(profile.get("kwai_id") or "")
+    creator_keys = {
+        normalize_account_key(profile.get("profile_id") or ""),
+        normalize_account_key(profile.get("account_id") or ""),
+        normalize_account_key(profile.get("phone") or ""),
+        normalize_account_key(profile.get("uid") or ""),
+        creator_kwai,
+    }
+    creator_keys = {item for item in creator_keys if item}
+    matched_submissions = [
+        item for item in submissions
+        if isinstance(item, dict)
+        and (
+            normalize_account_key(item.get("creator_id") or "") in creator_keys
+            or (creator_kwai and submission_kwai_id(item) == creator_kwai)
+        )
+    ]
+    submission_by_script: dict[str, list[dict[str, Any]]] = {}
+    for item in matched_submissions:
+        submission_by_script.setdefault(str(item.get("entry_id") or ""), []).append(item)
+    for script in scripts:
+        script["submission_count"] = len(submission_by_script.get(str(script.get("entry_id") or ""), []))
+        script["submissions"] = submission_by_script.get(str(script.get("entry_id") or ""), [])[:20]
+    return {
+        "profile_id": profile_id,
+        "categories": categories,
+        "total": total,
+        "limit": max(1, min(50, limit)),
+        "scripts": scripts,
+    }
 
 
 def create_or_update_creator_profile(payload: dict[str, Any], profile_id: str | None = None) -> dict[str, Any]:
@@ -1751,7 +1791,7 @@ def create_or_update_creator_profile(payload: dict[str, Any], profile_id: str | 
     else:
         profiles.insert(0, profile)
     save_creator_profiles(profiles)
-    return public_creator_profile(profile)
+    return public_creator_profile(profile, include_scripts=False, script_preview_limit=0)
 
 
 def delete_creator_profile(profile_id: str) -> bool:
@@ -2185,6 +2225,21 @@ class Handler(BaseHTTPRequestHandler):
             profiles = public_creator_profiles()
             self.send_json({"creators": profiles, "total": len(profiles), "categories": content_type_labels()})
             return
+        creator_reco_match = re.fullmatch(r"/api/admin/creators/([0-9a-f]{32})/recommendations", parsed.path)
+        if creator_reco_match:
+            if not self.require_admin():
+                return
+            q = urllib.parse.parse_qs(parsed.query)
+            try:
+                limit = max(1, min(50, int((q.get("limit") or ["5"])[0] or "5")))
+            except Exception:
+                limit = 5
+            payload = creator_recommendations_for_profile(creator_reco_match.group(1), limit=limit)
+            if payload is None:
+                self.send_json({"error": "Creator not found."}, status=404)
+                return
+            self.send_json(payload)
+            return
         creator_match = re.fullmatch(r"/api/admin/creators/([0-9a-f]{32})", parsed.path)
         if creator_match:
             if not self.require_admin():
@@ -2192,7 +2247,7 @@ class Handler(BaseHTTPRequestHandler):
             profile_id = creator_match.group(1)
             for profile in load_creator_profiles():
                 if str(profile.get("profile_id") or "") == profile_id:
-                    self.send_json({"creator": public_creator_profile(profile)})
+                    self.send_json({"creator": public_creator_profile(profile, include_scripts=False, script_preview_limit=0)})
                     return
             self.send_json({"error": "Creator not found."}, status=404)
             return
