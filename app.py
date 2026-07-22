@@ -1033,6 +1033,13 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
         "status": "pending_review",
         "created_at": now_iso(),
     }
+    matched_creator = match_submission_creator(submission)
+    if matched_creator:
+        submission.update({
+            "creator_profile_id": matched_creator.get("profile_id", ""),
+            "creator_profile_name": matched_creator.get("name", ""),
+            "creator_profile_kwai_id": matched_creator.get("kwai_id", ""),
+        })
     submissions = read_json_file(SUBMISSIONS_FILE, [])
     if not isinstance(submissions, list):
         submissions = []
@@ -1238,6 +1245,53 @@ def account_aliases(account: dict[str, Any]) -> set[str]:
 
 def submission_kwai_id(submission: dict[str, Any]) -> str:
     return normalize_kwai_id(submission.get("detected_kwai_id") or kwai_handle_from_url(str(submission.get("video_url") or "")))
+
+
+def match_submission_creator(submission: dict[str, Any], profiles: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    profiles = profiles if profiles is not None else load_creator_profiles()
+    submission_creator = normalize_account_key(submission.get("creator_id") or "")
+    submission_kwai = submission_kwai_id(submission)
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        account = find_account(str(profile.get("account_id") or profile.get("phone") or profile.get("kwai_id") or profile.get("uid") or ""))
+        creator_keys = {
+            normalize_account_key(profile.get("profile_id") or ""),
+            normalize_account_key(profile.get("account_id") or ""),
+            normalize_account_key(profile.get("phone") or ""),
+            normalize_account_key(profile.get("uid") or ""),
+            normalize_kwai_id(profile.get("kwai_id") or ""),
+        }
+        creator_keys.update(account_aliases(account) if account else set())
+        creator_keys = {item for item in creator_keys if item}
+        creator_kwai = normalize_kwai_id(profile.get("kwai_id") or "")
+        if (submission_creator and submission_creator in creator_keys) or (submission_kwai and creator_kwai and submission_kwai == creator_kwai):
+            return {
+                "profile_id": str(profile.get("profile_id") or ""),
+                "name": str(profile.get("name") or profile.get("kwai_id") or "Kwai creator"),
+                "kwai_id": str(profile.get("kwai_id") or ""),
+            }
+    return None
+
+
+def enrich_submission_records(submissions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    profiles = load_creator_profiles()
+    enriched: list[dict[str, Any]] = []
+    for item in submissions:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        matched = match_submission_creator(row, profiles)
+        if matched:
+            row["creator_profile_id"] = matched.get("profile_id", "")
+            row["creator_profile_name"] = matched.get("name", "")
+            row["creator_profile_kwai_id"] = matched.get("kwai_id", "")
+            row["creator_unmatched"] = False
+        else:
+            row["creator_unmatched"] = True
+            row["unmatched_reason"] = "未匹配到创作者账号、Kwai ID、UID 或手机号"
+        enriched.append(row)
+    return enriched
 
 
 def resolve_kwai_id_from_video_link(url: str, timeout: int = 12) -> str:
@@ -2337,7 +2391,9 @@ class Handler(BaseHTTPRequestHandler):
             submissions = read_json_file(SUBMISSIONS_FILE, [])
             if not isinstance(submissions, list):
                 submissions = []
-            self.send_json({"ok": True, "submissions": submissions, "total": len(submissions)})
+            enriched = enrich_submission_records(submissions)
+            unmatched_count = sum(1 for item in enriched if item.get("creator_unmatched"))
+            self.send_json({"ok": True, "submissions": enriched, "total": len(enriched), "unmatched_count": unmatched_count})
             return
         if parsed.path == "/api/admin/intakes":
             if not self.require_admin():
