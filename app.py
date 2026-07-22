@@ -1516,7 +1516,16 @@ def save_creator_profiles(profiles: list[dict[str, Any]]) -> None:
     write_json_atomic(CREATORS_FILE, profiles[:2000])
 
 
-def category_tokens(categories: list[str]) -> set[str]:
+def list_field(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item or "").strip() for item in value if str(item or "").strip()]
+    text = str(value or "").strip()
+    if not text:
+        return []
+    return [item.strip() for item in re.split(r"[、,，/]", text) if item.strip()]
+
+
+def category_tokens(categories: list[str], creator_type: dict[str, Any] | None = None) -> set[str]:
     tokens: set[str] = set()
     mapping = {
         "夫妻关系": ["夫妻", "妻子", "丈夫", "情侣", "夫妻吵架", "夫妻欺骗", "夫妻算计", "妻管严"],
@@ -1531,6 +1540,20 @@ def category_tokens(categories: list[str]) -> set[str]:
         if text:
             tokens.add(text)
         tokens.update(mapping.get(text, []))
+    type_mapping = {
+        "夫妻": ["夫妻", "妻子", "丈夫", "老婆", "老公", "casal", "esposa", "marido"],
+        "情侣": ["情侣", "女友", "男友", "namorado", "namorada", "casal"],
+        "家庭": ["家庭", "家人", "妈妈", "爸爸", "孩子", "família", "mãe", "pai", "filho"],
+        "朋友": ["朋友", "闺蜜", "兄弟", "amigo", "amiga", "colega"],
+        "家里": ["家里", "家庭", "卧室", "客厅", "厨房", "casa", "quarto", "cozinha"],
+        "乡村": ["乡村", "农村", "田野", "工厂", "roça", "rural", "campo", "fazenda"],
+        "城市": ["城市", "街道", "公司", "办公室", "rua", "cidade", "empresa", "escritório"],
+    }
+    if isinstance(creator_type, dict):
+        for field in ("identity", "location"):
+            for label in list_field(creator_type.get(field)):
+                tokens.add(label)
+                tokens.update(type_mapping.get(label, []))
     return {token for token in tokens if token}
 
 
@@ -1538,8 +1561,10 @@ def ranked_scripts_for_creator(
     categories: list[str],
     limit: int = 80,
     entries: list[dict[str, Any]] | None = None,
+    creator_type: dict[str, Any] | None = None,
+    offset: int = 0,
 ) -> tuple[int, list[dict[str, Any]]]:
-    tokens = category_tokens(categories)
+    tokens = category_tokens(categories, creator_type)
     if not tokens:
         return 0, []
     scored: list[tuple[int, int, dict[str, Any]]] = []
@@ -1558,9 +1583,11 @@ def ranked_scripts_for_creator(
         score += max(0, 12 - min(idx, 12))
         if score > 0:
             scored.append((score, idx, entry))
-    scored.sort(key=lambda pair: pair[0], reverse=True)
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
     public_scripts: list[dict[str, Any]] = []
-    for score, _, entry in scored[:max(0, limit)]:
+    start = max(0, offset)
+    end = start + max(0, limit)
+    for score, _, entry in scored[start:end]:
         public = public_entry(entry, 0)
         public["match_score"] = score
         public["share_url"] = f"/script/{public['entry_id']}"
@@ -1582,7 +1609,8 @@ def public_creator_profile(
 ) -> dict[str, Any]:
     categories = [str(item or "").strip() for item in profile.get("categories") or [] if str(item or "").strip()]
     script_limit = 80 if script_preview_limit is None else max(0, script_preview_limit)
-    script_total, scripts = ranked_scripts_for_creator(categories, script_limit, entries=entries) if include_scripts else (0, [])
+    creator_type = profile.get("creator_type") if isinstance(profile.get("creator_type"), dict) else {}
+    script_total, scripts = ranked_scripts_for_creator(categories, script_limit, entries=entries, creator_type=creator_type) if include_scripts else (0, [])
     submissions = submissions if submissions is not None else read_json_file(SUBMISSIONS_FILE, [])
     if not isinstance(submissions, list):
         submissions = []
@@ -1652,7 +1680,7 @@ def public_creator_profile(
         "account_id": str(profile.get("account_id") or account_public.get("account_id") or ""),
         "phone": str(profile.get("phone") or account_public.get("phone") or ""),
         "uid": str(profile.get("uid") or account_public.get("uid") or ""),
-        "creator_type": profile.get("creator_type") if isinstance(profile.get("creator_type"), dict) else {},
+        "creator_type": creator_type,
         "cooperation_level": str(profile.get("cooperation_level") or "待标注"),
         "creator_description": str(profile.get("creator_description") or profile.get("notes") or ""),
         "fed_script_count": script_total,
@@ -1677,12 +1705,13 @@ def public_creator_profiles() -> list[dict[str, Any]]:
     return profiles
 
 
-def creator_recommendations_for_profile(profile_id: str, limit: int = 5) -> dict[str, Any] | None:
+def creator_recommendations_for_profile(profile_id: str, limit: int = 5, offset: int = 0) -> dict[str, Any] | None:
     profile = next((item for item in load_creator_profiles() if str(item.get("profile_id") or "") == profile_id), None)
     if not profile:
         return None
     categories = [str(item or "").strip() for item in profile.get("categories") or [] if str(item or "").strip()]
-    total, scripts = ranked_scripts_for_creator(categories, max(1, min(50, limit)))
+    creator_type = profile.get("creator_type") if isinstance(profile.get("creator_type"), dict) else {}
+    total, scripts = ranked_scripts_for_creator(categories, max(1, min(50, limit)), creator_type=creator_type, offset=max(0, offset))
     submissions = read_json_file(SUBMISSIONS_FILE, [])
     if not isinstance(submissions, list):
         submissions = []
@@ -1712,8 +1741,10 @@ def creator_recommendations_for_profile(profile_id: str, limit: int = 5) -> dict
     return {
         "profile_id": profile_id,
         "categories": categories,
+        "creator_type": creator_type,
         "total": total,
         "limit": max(1, min(50, limit)),
+        "offset": max(0, offset),
         "scripts": scripts,
     }
 
@@ -1762,9 +1793,11 @@ def create_or_update_creator_profile(payload: dict[str, Any], profile_id: str | 
     incoming_creator_type = payload.get("creator_type") if isinstance(payload.get("creator_type"), dict) else {}
     creator_type = {**creator_type, **incoming_creator_type}
     for field in ["identity", "location"]:
-        value = str(payload.get(field) or payload.get(f"creator_{field}") or "").strip()
-        if value:
-            creator_type[field] = value
+        if field in payload or f"creator_{field}" in payload:
+            values = list_field(payload.get(field) if field in payload else payload.get(f"creator_{field}"))
+            creator_type[field] = values
+        elif field in incoming_creator_type:
+            creator_type[field] = list_field(incoming_creator_type.get(field))
     profile = {
         **base,
         **fetched,
@@ -2235,7 +2268,11 @@ class Handler(BaseHTTPRequestHandler):
                 limit = max(1, min(50, int((q.get("limit") or ["5"])[0] or "5")))
             except Exception:
                 limit = 5
-            payload = creator_recommendations_for_profile(creator_reco_match.group(1), limit=limit)
+            try:
+                offset = max(0, int((q.get("offset") or ["0"])[0] or "0"))
+            except Exception:
+                offset = 0
+            payload = creator_recommendations_for_profile(creator_reco_match.group(1), limit=limit, offset=offset)
             if payload is None:
                 self.send_json({"error": "Creator not found."}, status=404)
                 return
