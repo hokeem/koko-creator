@@ -1778,6 +1778,7 @@ def create_or_update_creator_profile(payload: dict[str, Any], profile_id: str | 
         "followers": str(payload.get("followers") or fetched.get("followers") or base.get("followers") or ""),
         "likes": str(payload.get("likes") or payload.get("likes_count") or base.get("likes") or ""),
         "favorites": str(payload.get("favorites") or payload.get("favorites_count") or base.get("favorites") or ""),
+        "poc": str(payload.get("poc") or payload.get("owner") or base.get("poc") or "").strip(),
         "categories": categories,
         "creator_type": creator_type,
         "cooperation_level": str(payload.get("cooperation_level") or base.get("cooperation_level") or "待标注").strip(),
