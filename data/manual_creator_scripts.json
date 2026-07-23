@@ -16,7 +16,13 @@
     "preview_image_url": "https://koko-fpml.onrender.com/static/manual_scripts/0f4b187290d9d8a6d21d4c45dd5e76d3/storyboard_cover.png",
     "source": "manual",
     "creator_featured": true,
-    "creator_published": true
+    "creator_published": true,
+    "location_tag": "房屋内外结合",
+    "location_tag_pt": "Casa: interno + externo",
+    "location_tag_confidence": "high",
+    "location_tag_source": "summary+storyboard",
+    "location_tag_reasoning": "room=2(em casa, casa); yard=0(); in/out=2/1; bridge=0(); 工地=0(); 酒馆=0(); 超市=0(); 药店=0()",
+    "location_tag_options_version": "location_7_v1"
   },
   {
     "entry_id": "d1ba876ca5d00c42b4fe0dfb552fc776",
@@ -37,7 +43,13 @@
     "source": "manual_excel_import",
     "manual_seq": "61702",
     "creator_featured": true,
-    "creator_published": true
+    "creator_published": true,
+    "location_tag": "室内房间",
+    "location_tag_pt": "Cômodo interno",
+    "location_tag_confidence": "medium",
+    "location_tag_source": "summary+storyboard",
+    "location_tag_reasoning": "room=2(banheiro, cama); yard=0(); in/out=2/0; bridge=0(); 工地=0(); 酒馆=0(); 超市=0(); 药店=0()",
+    "location_tag_options_version": "location_7_v1"
   },
   {
     "entry_id": "e596b50b70858828b15bbfa7ccfb505f",
@@ -58,7 +70,13 @@
     "source": "manual_excel_import",
     "manual_seq": "61703",
     "creator_featured": true,
-    "creator_published": true
+    "creator_published": true,
+    "location_tag": "室内房间",
+    "location_tag_pt": "Cômodo interno",
+    "location_tag_confidence": "high",
+    "location_tag_source": "summary+storyboard",
+    "location_tag_reasoning": "room=6(quarto, cama); yard=0(); in/out=6/0; bridge=0(); 工地=0(); 酒馆=0(); 超市=0(); 药店=0()",
+    "location_tag_options_version": "location_7_v1"
   },
   {
     "entry_id": "c2a595717b4a576f807e0d6a9fb53096",
@@ -79,7 +97,13 @@
     "source": "manual_excel_import",
     "manual_seq": "61603",
     "creator_featured": true,
-    "creator_published": true
+    "creator_published": true,
+    "location_tag": "室内房间",
+    "location_tag_pt": "Cômodo interno",
+    "location_tag_confidence": "low",
+    "location_tag_source": "summary+storyboard",
+    "location_tag_reasoning": "room=0(); yard=0(); in/out=0/0; bridge=0(); 工地=0(); 酒馆=0(); 超市=0(); 药店=0()",
+    "location_tag_options_version": "location_7_v1"
   },
   {
     "entry_id": "7a3ed5b318d4e7d95207eb072439d4a5",
@@ -100,7 +124,13 @@
     "source": "manual_excel_import",
     "manual_seq": "61503",
     "creator_featured": true,
-    "creator_published": true
+    "creator_published": true,
+    "location_tag": "室内房间",
+    "location_tag_pt": "Cômodo interno",
+    "location_tag_confidence": "high",
+    "location_tag_source": "summary+storyboard",
+    "location_tag_reasoning": "room=4(cama, casa); yard=0(); in/out=4/0; bridge=0(); 工地=0(); 酒馆=0(); 超市=0(); 药店=0()",
+    "location_tag_options_version": "location_7_v1"
   },
   {
     "entry_id": "4060b897d202ab93af9972f25cf99253",
@@ -121,7 +151,13 @@
     "source": "manual_excel_import",
     "manual_seq": "61101",
     "creator_featured": true,
-    "creator_published": true
+    "creator_published": true,
+    "location_tag": "乡村院子",
+    "location_tag_pt": "Quintal / rural",
+    "location_tag_confidence": "low",
+    "location_tag_source": "summary+storyboard",
+    "location_tag_reasoning": "room=0(); yard=0(); in/out=0/1; bridge=0(); 工地=0(); 酒馆=0(); 超市=0(); 药店=0()",
+    "location_tag_options_version": "location_7_v1"
   },
   {
     "entry_id": "5612737a993f527046465269b9f51c19",
@@ -142,7 +178,13 @@
     "source": "manual_excel_import",
     "manual_seq": "61103",
     "creator_featured": true,
-    "creator_published": true
+    "creator_published": true,
+    "location_tag": "室内房间",
+    "location_tag_pt": "Cômodo interno",
+    "location_tag_confidence": "medium",
+    "location_tag_source": "summary+storyboard",
+    "location_tag_reasoning": "room=2(cozinha); yard=0(); in/out=2/0; bridge=0(); 工地=0(); 酒馆=0(); 超市=0(); 药店=0()",
+    "location_tag_options_version": "location_7_v1"
   },
   {
     "entry_id": "6041bae575d7580daffa54a9acf55d6c",
@@ -163,7 +205,13 @@
     "source": "manual_excel_import",
     "manual_seq": "60902",
     "creator_featured": true,
-    "creator_published": true
+    "creator_published": true,
+    "location_tag": "乡村院子",
+    "location_tag_pt": "Quintal / rural",
+    "location_tag_confidence": "low",
+    "location_tag_source": "summary+storyboard",
+    "location_tag_reasoning": "room=0(); yard=0(); in/out=0/1; bridge=0(); 工地=0(); 酒馆=0(); 超市=0(); 药店=0()",
+    "location_tag_options_version": "location_7_v1"
   },
   {
     "entry_id": "cda5326eacc4e0dceb72cc702e1f0fce",
@@ -184,6 +232,12 @@
     "source": "manual_excel_import",
     "manual_seq": "60807",
     "creator_featured": true,
-    "creator_published": true
+    "creator_published": true,
+    "location_tag": "室内房间",
+    "location_tag_pt": "Cômodo interno",
+    "location_tag_confidence": "medium",
+    "location_tag_source": "summary+storyboard",
+    "location_tag_reasoning": "room=2(cama); yard=0(); in/out=2/0; bridge=0(); 工地=0(); 酒馆=0(); 超市=0(); 药店=0()",
+    "location_tag_options_version": "location_7_v1"
   }
 ]
