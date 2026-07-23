@@ -33,6 +33,7 @@ SEED_MANUAL_LIBRARY_FILE = BASE / "data" / "manual_creator_scripts.json"
 LIBRARY_FILE = DATA_ROOT / "creator_online_library.json"
 MANUAL_LIBRARY_FILE = DATA_ROOT / "manual_creator_scripts.json"
 SUBMISSIONS_FILE = DATA_ROOT / "creator_submissions.json"
+CREATOR_EVENTS_FILE = DATA_ROOT / "creator_events.json"
 INTAKE_FILE = DATA_ROOT / "creator_intake_submissions.json"
 CREATORS_FILE = DATA_ROOT / "creator_profiles.json"
 ACCOUNTS_FILE = DATA_ROOT / "creator_accounts.json"
@@ -1048,6 +1049,225 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
     return submission
 
 
+
+
+def client_ip_from_headers(headers: Any, client_address: Any = None) -> str:
+    for key in ["CF-Connecting-IP", "X-Real-IP", "X-Forwarded-For"]:
+        raw = str(headers.get(key) or "").strip()
+        if raw:
+            return raw.split(",", 1)[0].strip()
+    if isinstance(client_address, tuple) and client_address:
+        return str(client_address[0] or "")
+    return ""
+
+
+def anonymize_ip(ip: str) -> dict[str, str]:
+    text = str(ip or "").strip()
+    digest = hmac.new((ADMIN_PASSWORD or "koko").encode("utf-8"), text.encode("utf-8"), hashlib.sha256).hexdigest()[:16] if text else ""
+    masked = ""
+    if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", text):
+        parts = text.split(".")
+        masked = ".".join(parts[:2] + ["x", "x"])
+    elif ":" in text:
+        masked = ":".join(text.split(":")[:3] + ["..."])
+    return {"ip_hash": digest, "ip_masked": masked}
+
+
+def clean_event_meta(value: Any, depth: int = 0) -> Any:
+    if depth > 2:
+        return ""
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in list(value.items())[:30]:
+            clean_key = re.sub(r"[^0-9A-Za-z_.-]+", "_", str(key or "")).strip("_")[:80]
+            if clean_key:
+                out[clean_key] = clean_event_meta(item, depth + 1)
+        return out
+    if isinstance(value, list):
+        return [clean_event_meta(item, depth + 1) for item in value[:40]]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return str(value or "").strip()[:500]
+
+
+def load_creator_events() -> list[dict[str, Any]]:
+    events = read_json_file(CREATOR_EVENTS_FILE, [])
+    return events if isinstance(events, list) else []
+
+
+def event_account_from_payload(payload: dict[str, Any], headers: Any) -> dict[str, Any] | None:
+    account = current_account(headers)
+    if account:
+        return account
+    raw = str(payload.get("creator_id") or payload.get("account_id") or "").strip()
+    return find_account(raw) if raw else None
+
+
+def save_creator_event(payload: dict[str, Any], headers: Any, client_address: Any = None) -> dict[str, Any]:
+    event_name = re.sub(r"[^0-9a-zA-Z_.:-]+", "_", str(payload.get("event") or "").strip())[:80]
+    if not event_name:
+        raise ValueError("Event name required.")
+    meta = clean_event_meta(payload.get("meta") if isinstance(payload.get("meta"), dict) else {})
+    account = event_account_from_payload(payload, headers)
+    raw_ip = client_ip_from_headers(headers, client_address)
+    ip_info = anonymize_ip(raw_ip)
+    entry_id = str(payload.get("script_id") or payload.get("entry_id") or meta.get("script_id") or meta.get("entry_id") or "").strip()
+    if entry_id and not re.fullmatch(r"[0-9a-f]{32}", entry_id):
+        entry_id = ""
+    account_id = str((account or {}).get("account_id") or payload.get("creator_id") or "").strip()[:120]
+    event = {
+        "event_id": uuid4().hex,
+        "event": event_name,
+        "created_at": now_iso(),
+        "creator_id": normalize_account_key(account_id),
+        "creator_name": str((account or {}).get("display_name") or "")[:120],
+        "script_id": entry_id,
+        "path": str(payload.get("path") or "")[:240],
+        "referrer": str(payload.get("referrer") or headers.get("Referer") or "")[:500],
+        "language": str(payload.get("language") or "")[:16],
+        "session_id": str(payload.get("session_id") or "")[:120],
+        "visitor_id": str(payload.get("visitor_id") or "")[:120],
+        "user_agent": str(headers.get("User-Agent") or "")[:500],
+        "ip_hash": ip_info.get("ip_hash") or "",
+        "ip_masked": ip_info.get("ip_masked") or "",
+        "meta": meta,
+    }
+    events = load_creator_events()
+    events.insert(0, event)
+    write_json_atomic(CREATOR_EVENTS_FILE, events[:20000])
+    return event
+
+
+def parse_event_dt(value: Any) -> datetime | None:
+    try:
+        text = str(value or "").replace("Z", "+00:00")
+        dt = datetime.fromisoformat(text)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def creator_event_day(value: Any, tz: timezone = timezone(timedelta(hours=-3))) -> str:
+    dt = parse_event_dt(value) or datetime.now(timezone.utc)
+    return dt.astimezone(tz).strftime("%Y-%m-%d")
+
+
+def creator_script_title(entry_id: str) -> str:
+    entry = entry_by_id(entry_id)
+    return str((entry or {}).get("title") or entry_id or "")
+
+
+def build_creator_analytics(days: int = 14) -> dict[str, Any]:
+    days = max(1, min(90, int(days or 14)))
+    tz = timezone(timedelta(hours=-3))
+    now_dt = datetime.now(timezone.utc)
+    today = now_dt.astimezone(tz).date()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    events = load_creator_events()
+    submissions = read_json_file(SUBMISSIONS_FILE, [])
+    submissions = submissions if isinstance(submissions, list) else []
+    accounts = {str(a.get("account_id") or ""): public_account(a) for a in load_accounts()}
+    day_map: dict[str, dict[str, Any]] = {}
+    creator_map: dict[str, dict[str, Any]] = {}
+    script_map: dict[str, dict[str, Any]] = {}
+    event_names: dict[str, int] = {}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        dt = parse_event_dt(event.get("created_at"))
+        if not dt:
+            continue
+        if now_dt - dt > timedelta(days=days):
+            continue
+        day = creator_event_day(event.get("created_at"), tz)
+        bucket = day_map.setdefault(day, {"date": day, "events": 0, "creators": set(), "visitors": set(), "scripts": set(), "submissions": 0})
+        bucket["events"] += 1
+        if event.get("creator_id"):
+            bucket["creators"].add(str(event.get("creator_id")))
+        if event.get("visitor_id") or event.get("ip_hash"):
+            bucket["visitors"].add(str(event.get("visitor_id") or event.get("ip_hash")))
+        if event.get("script_id"):
+            bucket["scripts"].add(str(event.get("script_id")))
+        name = str(event.get("event") or "")
+        event_names[name] = event_names.get(name, 0) + 1
+        creator_id = str(event.get("creator_id") or event.get("visitor_id") or event.get("ip_hash") or "unknown")
+        c = creator_map.setdefault(creator_id, {"creator_id": creator_id, "creator_name": str(event.get("creator_name") or accounts.get(creator_id, {}).get("display_name") or creator_id), "events": 0, "detail_views": 0, "favorites": 0, "calendar_adds": 0, "shares": 0, "submissions": 0, "last_seen": "", "scripts": set()})
+        c["events"] += 1
+        c["last_seen"] = max(str(c.get("last_seen") or ""), str(event.get("created_at") or ""))
+        if event.get("script_id"):
+            c["scripts"].add(str(event.get("script_id")))
+        if name == "script_detail_view":
+            c["detail_views"] += 1
+        if name == "favorite_add":
+            c["favorites"] += 1
+        if name == "calendar_add":
+            c["calendar_adds"] += 1
+        if name == "share_copy":
+            c["shares"] += 1
+        script_id = str(event.get("script_id") or "")
+        if script_id:
+            s = script_map.setdefault(script_id, {"script_id": script_id, "title": creator_script_title(script_id), "events": 0, "impressions": 0, "detail_views": 0, "favorites": 0, "calendar_adds": 0, "shares": 0, "submissions": 0, "creators": set()})
+            s["events"] += 1
+            if creator_id:
+                s["creators"].add(creator_id)
+            if name == "script_impression":
+                s["impressions"] += 1
+            if name == "script_detail_view":
+                s["detail_views"] += 1
+            if name == "favorite_add":
+                s["favorites"] += 1
+            if name == "calendar_add":
+                s["calendar_adds"] += 1
+            if name == "share_copy":
+                s["shares"] += 1
+    for sub in submissions:
+        if not isinstance(sub, dict):
+            continue
+        day = creator_event_day(sub.get("created_at"), tz)
+        if day in day_map:
+            day_map[day]["submissions"] += 1
+        creator_id = str(sub.get("creator_id") or "")
+        if creator_id:
+            c = creator_map.setdefault(creator_id, {"creator_id": creator_id, "creator_name": accounts.get(creator_id, {}).get("display_name") or creator_id, "events": 0, "detail_views": 0, "favorites": 0, "calendar_adds": 0, "shares": 0, "submissions": 0, "last_seen": "", "scripts": set()})
+            c["submissions"] += 1
+        script_id = str(sub.get("entry_id") or "")
+        if script_id:
+            s = script_map.setdefault(script_id, {"script_id": script_id, "title": creator_script_title(script_id), "events": 0, "impressions": 0, "detail_views": 0, "favorites": 0, "calendar_adds": 0, "shares": 0, "submissions": 0, "creators": set()})
+            s["submissions"] += 1
+    daily = []
+    for i in range(days):
+        day = (today - timedelta(days=i)).isoformat()
+        raw = day_map.get(day, {"date": day, "events": 0, "creators": set(), "visitors": set(), "scripts": set(), "submissions": 0})
+        daily.append({"date": day, "events": raw["events"], "active_creators": len(raw["creators"]), "unique_visitors": len(raw["visitors"]), "scripts": len(raw["scripts"]), "submissions": raw["submissions"]})
+    yesterday_row = next((row for row in daily if row["date"] == yesterday), {"events": 0, "active_creators": 0, "unique_visitors": 0, "scripts": 0, "submissions": 0})
+    def clean_sets(row: dict[str, Any]) -> dict[str, Any]:
+        out = dict(row)
+        for key in ["scripts", "creators"]:
+            if isinstance(out.get(key), set):
+                out[key] = len(out[key])
+        return out
+    creators = sorted((clean_sets(v) for v in creator_map.values()), key=lambda x: (x.get("submissions", 0), x.get("detail_views", 0), x.get("events", 0)), reverse=True)[:80]
+    scripts = sorted((clean_sets(v) for v in script_map.values()), key=lambda x: (x.get("submissions", 0), x.get("detail_views", 0), x.get("favorites", 0)), reverse=True)[:80]
+    recent = events[:80]
+    return {
+        "ok": True,
+        "generated_at": now_iso(),
+        "timezone": "America/Sao_Paulo",
+        "summary": {
+            "yesterday_active_creators": yesterday_row.get("active_creators", 0),
+            "yesterday_unique_visitors": yesterday_row.get("unique_visitors", 0),
+            "yesterday_events": yesterday_row.get("events", 0),
+            "yesterday_submissions": yesterday_row.get("submissions", 0),
+            "total_events": len(events),
+            "total_submissions": len(submissions),
+        },
+        "daily": daily,
+        "event_counts": sorted(({"event": k, "count": v} for k, v in event_names.items()), key=lambda x: x["count"], reverse=True),
+        "creators": creators,
+        "scripts": scripts,
+        "recent_events": recent,
+    }
+
 def backfill_submission_creators(limit: int = 200) -> dict[str, Any]:
     submissions = read_json_file(SUBMISSIONS_FILE, [])
     if not isinstance(submissions, list):
@@ -2059,6 +2279,11 @@ const initialScriptId=(()=>{{const path=location.pathname.match(/^\\/script\\/([
 const forceLanding=new URLSearchParams(location.search).get("landing")==="1";
 const I={{pt:{{homePill:"Biblioteca de roteiros",homeTitle:"Encontre roteiros que você consegue gravar",homeLead:"Responda 3 perguntas e veja roteiros para o seu estilo.",start:"Começar agora",seePopular:"Ver populares",todayPill:"Recomendação de roteiros",todayTitle:"Recomendação de roteiros",todayLead:"Abra e escolha um roteiro para ver os detalhes.",quickNew:"roteiros",quickSaved:"salvos",quickPlan:"para gravar",next:"Próxima etapa",prev:"Etapa anterior",finish:"Ver recomendações",libraryPill:"Biblioteca",libraryTitle:"Sua biblioteca recomendada",savedPill:"Meus roteiros",savedTitle:"Sua lista de gravação",navHome:"Roteiros",navLibrary:"Biblioteca",navSaved:"Eu",navPrefs:"Perfil",changePrefs:"Mudar preferências",editCover:"Editar capa",editAvatar:"Editar avatar",logout:"Sair",profileBio:"Biblioteca pessoal de roteiros e gravações.",profileHome:"Início",open:"Abrir",save:"Salvar",plan:"Vou gravar",done:"Gravado",reject:"Não serve",original:"Referencia",details:"Detalhes",submitTitle:"Enviar vídeo gravado",submitHint:"Envie o link do vídeo gravado seguindo este roteiro. Vamos revisar e, se aprovado, ajudar com impulsionamento.",submitPlaceholder:"Cole aqui o link do seu vídeo",submitButton:"Enviar para revisão",submitOk:"Recebido. Vamos revisar seu vídeo.",submitError:"Não foi possível enviar. Confira o link.",empty:"Nada aqui ainda",emptyText:"Salve um roteiro da recomendação para montar sua lista.",statusSaved:"Salvos",statusPlanned:"Vou gravar",statusFinished:"Gravados",statusRejected:"Não servem",step:"Etapa"}},zh:{{homePill:"脚本推荐",homeTitle:"找到你真的能拍的脚本",homeLead:"回答 3 个问题，进入你的推荐脚本页面。",start:"开始选择",seePopular:"先看热门",todayPill:"脚本推荐",todayTitle:"脚本推荐",todayLead:"点开卡片，查看完整脚本和拍摄说明。",quickNew:"推荐脚本",quickSaved:"已收藏",quickPlan:"准备拍",next:"下一步",prev:"上一步",finish:"查看推荐",libraryPill:"脚本库",libraryTitle:"你的推荐脚本库",savedPill:"我的脚本",savedTitle:"你的拍摄清单",navHome:"脚本推荐",navLibrary:"脚本库",navSaved:"我",navPrefs:"偏好",changePrefs:"重新选择偏好",editCover:"编辑封面",editAvatar:"编辑头像",logout:"退出登录",profileBio:"你的脚本收藏和视频回传记录。",profileHome:"主页",open:"打开",save:"收藏",plan:"准备拍",done:"已拍",reject:"不适合",original:"参考视频",details:"完整脚本",submitTitle:"回传拍摄视频",submitHint:"上传按照脚本拍摄的视频，我们会审核后给您投流。",submitPlaceholder:"把你发布后的视频链接粘贴在这里",submitButton:"提交审核",submitOk:"已收到，我们会审核这个视频。",submitError:"提交失败，请检查链接。",empty:"这里还没有脚本",emptyText:"先从脚本推荐里收藏一个脚本。",statusSaved:"收藏",statusPlanned:"准备拍",statusFinished:"已拍",statusRejected:"不适合",step:"第"}}}};
 const t=k=>(I.pt&&I.pt[k])||k; const label=x=>x.pt||x.zh||""; const esc=v=>String(v||"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[c]));
+const analyticsVisitorKey="koko_creator_visitor_v1"; const analyticsSessionKey="koko_creator_session_v1";
+function analyticsId(store,key){{let v=store.getItem(key)||"";if(!v){{v=(crypto.randomUUID?crypto.randomUUID():`${{Date.now()}}-${{Math.random().toString(16).slice(2)}}`);store.setItem(key,v)}}return v}}
+const analyticsVisitorId=analyticsId(localStorage,analyticsVisitorKey); const analyticsSessionId=analyticsId(sessionStorage,analyticsSessionKey);
+function track(event,meta={{}}){{try{{const payload={{event,meta,path:location.pathname+location.search,referrer:document.referrer,language:lang,creator_id:creatorUser?.account_id||creatorUser?.phone||creatorUser?.kwai_id||"",session_id:analyticsSessionId,visitor_id:analyticsVisitorId}};const body=JSON.stringify(payload);if(navigator.sendBeacon){{const ok=navigator.sendBeacon("/api/creator/events",new Blob([body],{{type:"application/json"}}));if(ok)return}}fetch("/api/creator/events",{{method:"POST",headers:{{"Content-Type":"application/json"}},body,keepalive:true}}).catch(()=>{{}})}}catch(err){{}}}}
+function trackScripts(event,list,extra={{}}){{(list||[]).slice(0,40).forEach((item,index)=>track(event,{{...extra,script_id:item.entry_id,index,title:item.title||""}}))}}
 function answerValues(qid){{const v=answers[qid];return Array.isArray(v)?v:(v?[v]:[])}}
 function isMultipleQuestion(q){{return !!q?.multiple}}
 function optionAllowed(opt){{if(!opt)return false;if(Array.isArray(opt.people)&&opt.people.length&&!opt.people.includes(answers.people))return false;if(Array.isArray(opt.scenes)&&opt.scenes.length&&!opt.scenes.includes(answers.scene))return false;return true}}
@@ -2081,24 +2306,24 @@ function openAuth(mode="login"){{setAuthMode(mode);document.querySelector("#auth
 function closeAuth(){{document.querySelector("#auth-modal").classList.remove("active")}}
 async function loadAccountState(){{if(!creatorUser)return null;try{{const r=await fetch(`/api/me/state?_=${{Date.now()}}`);const d=await r.json();if(r.status===401){{creatorUser=null;localStorage.removeItem(authKey);return null}}if(!r.ok)throw new Error(d.error||"state failed");creatorUser=d.account||creatorUser;localStorage.setItem(authKey,JSON.stringify(creatorUser));const state=d.state||{{}};if(state.preferences){{answers=state.preferences;localStorage.setItem(profileKey,JSON.stringify(answers))}}if(state.workspace){{workspace=state.workspace;if(!workspace.schedule||Array.isArray(workspace.schedule))workspace.schedule={{}};localStorage.setItem(workspaceKey,JSON.stringify(workspace))}}if(state.profile_ui){{profileUi=state.profile_ui;localStorage.setItem(profileUiKey,JSON.stringify(profileUi))}}submissions=Array.isArray(d.submissions)?d.submissions:submissions;return d}}catch(err){{return null}}}}
 let persistTimer=null;function persistAccountState(){{if(!creatorUser)return;if(persistTimer)clearTimeout(persistTimer);persistTimer=setTimeout(async()=>{{try{{await fetch("/api/me/state",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{preferences:answers,workspace,profile_ui:profileUi,language:lang}})}})}}catch(err){{}}}},260)}}
-async function handleAuthSubmit(e){{e.preventDefault();const form=new FormData(e.currentTarget);const phone=String(form.get("phone")||"").replace(/\\s+/g,"").trim();if(!phone){{alert(authCopy().missing);return}}try{{const r=await fetch("/api/auth/login",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{phone}})}});const d=await r.json();if(!r.ok)throw new Error(d.error||authCopy().notFound);creatorUser=d.account;localStorage.setItem(authKey,JSON.stringify(creatorUser));await loadAccountState();updateCreatorName();closeAuth();if(!hasProfile())show("choose");else show("dashboard")}}catch(err){{alert(authCopy().notFound)}}}}
-async function logout(){{creatorUser=null;localStorage.removeItem(authKey);await fetch("/api/auth/logout",{{method:"POST",body:"{{}}"}}).catch(()=>null);closeDetail();closeAuth();show("home")}}
+async function handleAuthSubmit(e){{e.preventDefault();const form=new FormData(e.currentTarget);const phone=String(form.get("phone")||"").replace(/\\s+/g,"").trim();if(!phone){{alert(authCopy().missing);return}}try{{const r=await fetch("/api/auth/login",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{phone}})}});const d=await r.json();if(!r.ok)throw new Error(d.error||authCopy().notFound);creatorUser=d.account;localStorage.setItem(authKey,JSON.stringify(creatorUser));track("login",{{method:"phone"}});await loadAccountState();updateCreatorName();closeAuth();if(!hasProfile())show("choose");else show("dashboard")}}catch(err){{alert(authCopy().notFound)}}}}
+async function logout(){{track("logout",{{}});creatorUser=null;localStorage.removeItem(authKey);await fetch("/api/auth/logout",{{method:"POST",body:"{{}}"}}).catch(()=>null);closeDetail();closeAuth();show("home")}}
 function ids(k){{return new Set(workspace[k]||[])}} function statusOf(id){{return ids("planned").has(id)?"planned":ids("finished").has(id)?"finished":ids("rejected").has(id)?"rejected":ids("saved").has(id)?"saved":""}} function entry(id){{return entries.find(e=>e.entry_id===id)}}
-function setStatus(id,status){{["saved","planned","finished","rejected"].forEach(k=>workspace[k]=(workspace[k]||[]).filter(x=>x!==id)); if(status) workspace[status]=[...(workspace[status]||[]),id]; saveWorkspace(); renderCurrent()}}
+function setStatus(id,status){{const prev=statusOf(id);["saved","planned","finished","rejected"].forEach(k=>workspace[k]=(workspace[k]||[]).filter(x=>x!==id)); if(status) workspace[status]=[...(workspace[status]||[]),id]; if(status==="saved"&&prev!=="saved")track("favorite_add",{{script_id:id,previous_status:prev}}); if(!status&&prev==="saved")track("favorite_remove",{{script_id:id}}); if(status==="planned"&&prev!=="planned")track("plan_add",{{script_id:id,previous_status:prev}}); if(status==="finished"&&prev!=="finished")track("mark_finished",{{script_id:id,previous_status:prev}}); saveWorkspace(); renderCurrent()}}
 function counts(){{const n=document.querySelector("#count-new");if(n)n.textContent=String(entries.length);const s=document.querySelector("#count-saved");if(s)s.textContent=String((workspace.saved||[]).length);const p=document.querySelector("#count-planned");if(p)p.textContent=String((workspace.planned||[]).length);updateProfileHeader()}}
 function applyLang(){{document.documentElement.lang="pt-BR";document.querySelectorAll("[data-t]").forEach(n=>n.textContent=t(n.dataset.t));document.querySelectorAll("[data-html]").forEach(n=>n.innerHTML=t(n.dataset.html));renderQuestion();renderCurrent();counts();setAuthMode(authMode)}}
-function show(v){{if(v==="library")v="dashboard";if(["dashboard","saved","all-scripts"].includes(v)&&(!creatorUser||!hasProfile()))v="home";if(v==="choose"&&!creatorUser)v="home";if(v==="choose")step=0;document.querySelectorAll("[data-view]").forEach(x=>x.classList.toggle("active",x.dataset.view===v));if(v==="choose")renderQuestion();if(v==="dashboard")renderDashboard();if(v==="all-scripts")renderAllScripts();if(v==="saved")renderSaved();document.querySelectorAll(".bottom button").forEach(b=>b.classList.toggle("active",b.dataset.go===v||v==="all-scripts"&&b.dataset.go==="dashboard"));scrollTo({{top:0,behavior:"smooth"}})}}
+function show(v){{if(v==="library")v="dashboard";if(["dashboard","saved","all-scripts"].includes(v)&&(!creatorUser||!hasProfile()))v="home";if(v==="choose"&&!creatorUser)v="home";if(v==="choose")step=0;document.querySelectorAll("[data-view]").forEach(x=>x.classList.toggle("active",x.dataset.view===v));if(v==="choose")renderQuestion();if(v==="dashboard")renderDashboard();if(v==="all-scripts")renderAllScripts();if(v==="saved")renderSaved();document.querySelectorAll(".bottom button").forEach(b=>b.classList.toggle("active",b.dataset.go===v||v==="all-scripts"&&b.dataset.go==="dashboard"));track("page_view",{{view:v,has_profile:hasProfile()}});scrollTo({{top:0,behavior:"smooth"}})}}
 function renderQuestion(){{normalizeAnswers();if(!stepAvailable(step)){{const first=questions.findIndex((_,i)=>stepAvailable(i));step=first>=0?first:0}}const q=questions[step];const opts=optionsFor(q);const total=stepCountLabel();const pos=currentStepPosition();const multi=isMultipleQuestion(q);document.querySelector("#step-label").textContent=lang==="zh"?`${{t("step")}} ${{pos}} / ${{total}}`:`${{t("step")}} ${{pos}} de ${{total}}`;document.querySelector("#stepper").innerHTML=questions.map((_,i)=>stepAvailable(i)?`<button class="step ${{i===step?"active":""}}" type="button" data-step="${{i}}">${{questions.slice(0,i+1).filter((_,j)=>stepAvailable(j)).length}}</button>`:"").join("");document.querySelector("#question").innerHTML=`<h1>${{esc(label(q))}}</h1>${{multi?`<p class="lead">${{lang==="zh"?"可以多选，Koko 会把这些时长的脚本合并推荐。":"Pode escolher mais de uma duração. A Koko mistura esses roteiros na recomendação."}}</p>`:""}}<div class="options">${{opts.map(o=>`<button class="option ${{answerValues(q.id).includes(o.id)?"selected":""}}" data-answer="${{q.id}}" data-value="${{o.id}}">${{esc(label(o))}}</button>`).join("")}}</div>${{multi?`<button class="primary question-submit" type="button" id="next-step"><span>${{t("finish")}}</span></button>`:""}}`;const next=document.querySelector("#next-step span");if(next)next.textContent=nextAvailableAfter(step)<0?t("finish"):t("next");const prev=document.querySelector("#prev-step");if(prev){{prev.style.visibility=questions.slice(0,step).some((_,i)=>stepAvailable(i))?"visible":"hidden";prev.disabled=prev.style.visibility==="hidden"}}}}
 function entryTimestamp(e){{const raw=e.script_date||e.created_at||e.saved_at||"";const n=Date.parse(raw);return Number.isNaN(n)?0:n}}
 let entriesLoadedLimit=0;let entriesLoadedKey="";
 function recommendationKey(){{return selectedAnswerValues().join("|")}}
-async function loadEntries(limit=48,opts={{}}){{const key=recommendationKey();const force=!!opts.force;if(!force&&entries.length&&entriesLoadedKey===key&&entriesLoadedLimit>=limit){{counts();return entries}}const cacheKey=`koko_reco_cache_v2_${{key}}_${{limit}}`;if(!force){{try{{const cached=JSON.parse(sessionStorage.getItem(cacheKey)||"null");if(cached&&Date.now()-cached.ts<10*60*1000&&Array.isArray(cached.entries)){{entries=cached.entries;entriesLoadedKey=key;entriesLoadedLimit=limit;counts();return entries}}}}catch(err){{}}}}const p=new URLSearchParams({{limit:String(limit)}});selectedAnswerValues().forEach(v=>p.append("selected",v));const r=await fetch(`/api/creator/recommendations?${{p.toString()}}&_=${{Date.now()}}`);const d=await r.json();if(!r.ok)throw new Error(d.error||"load failed");entries=(d.entries||[]).slice();if(!hasMultiDurationSelection())entries.sort((a,b)=>entryTimestamp(b)-entryTimestamp(a));entriesLoadedKey=key;entriesLoadedLimit=limit;try{{sessionStorage.setItem(cacheKey,JSON.stringify({{ts:Date.now(),entries}}))}}catch(err){{}}counts();return entries}}
+async function loadEntries(limit=48,opts={{}}){{const key=recommendationKey();const force=!!opts.force;if(!force&&entries.length&&entriesLoadedKey===key&&entriesLoadedLimit>=limit){{counts();track("recommendation_view",{{source:"memory",limit,selected:selectedAnswerValues(),count:entries.length}});trackScripts("script_impression",entries.slice(0,12),{{surface:"recommendation"}});return entries}}const cacheKey=`koko_reco_cache_v2_${{key}}_${{limit}}`;if(!force){{try{{const cached=JSON.parse(sessionStorage.getItem(cacheKey)||"null");if(cached&&Date.now()-cached.ts<10*60*1000&&Array.isArray(cached.entries)){{entries=cached.entries;entriesLoadedKey=key;entriesLoadedLimit=limit;counts();track("recommendation_view",{{source:"cache",limit,selected:selectedAnswerValues(),count:entries.length}});trackScripts("script_impression",entries.slice(0,12),{{surface:"recommendation"}});return entries}}}}catch(err){{}}}}const p=new URLSearchParams({{limit:String(limit)}});selectedAnswerValues().forEach(v=>p.append("selected",v));const r=await fetch(`/api/creator/recommendations?${{p.toString()}}&_=${{Date.now()}}`);const d=await r.json();if(!r.ok)throw new Error(d.error||"load failed");entries=(d.entries||[]).slice();if(!hasMultiDurationSelection())entries.sort((a,b)=>entryTimestamp(b)-entryTimestamp(a));entriesLoadedKey=key;entriesLoadedLimit=limit;try{{sessionStorage.setItem(cacheKey,JSON.stringify({{ts:Date.now(),entries}}))}}catch(err){{}}counts();track("recommendation_view",{{source:"network",limit,selected:selectedAnswerValues(),count:entries.length}});trackScripts("script_impression",entries.slice(0,12),{{surface:"recommendation"}});return entries}}
 function chips(){{const lookup=Object.fromEntries(questions.flatMap(q=>q.options.map(o=>[o.id,o])));return selectedAnswerValues().map(id=>lookup[id]).filter(Boolean).map(o=>`<span class="chip">${{esc(label(o))}} ✓</span>`).join("")}}
 function dayKey(d){{const y=d.getFullYear();const m=String(d.getMonth()+1).padStart(2,"0");const day=String(d.getDate()).padStart(2,"0");return `${{y}}-${{m}}-${{day}}`}}
 function todayKey(){{return dayKey(new Date())}}
 function scheduleLabel(key){{const d=new Date(`${{key}}T00:00:00`);if(Number.isNaN(d.getTime()))return key;return lang==="zh"?`${{d.getMonth()+1}}月${{d.getDate()}}日`:`${{String(d.getDate()).padStart(2,"0")}}/${{String(d.getMonth()+1).padStart(2,"0")}}`}}
 function scheduleCount(){{return Object.values(workspace.schedule||{{}}).reduce((n,arr)=>n+(Array.isArray(arr)?arr.length:0),0)}}
-function saveScheduleItem(id,date){{workspace.schedule=workspace.schedule||{{}};const key=date||todayKey();Object.keys(workspace.schedule).forEach(k=>workspace.schedule[k]=(workspace.schedule[k]||[]).filter(x=>x!==id));workspace.schedule[key]=[...(workspace.schedule[key]||[]),id];scheduleViewDate=key;saveWorkspace()}}
+function saveScheduleItem(id,date){{workspace.schedule=workspace.schedule||{{}};const key=date||todayKey();Object.keys(workspace.schedule).forEach(k=>workspace.schedule[k]=(workspace.schedule[k]||[]).filter(x=>x!==id));workspace.schedule[key]=[...(workspace.schedule[key]||[]),id];scheduleViewDate=key;track("calendar_add",{{script_id:id,date:key}});saveWorkspace()}}
 function openScheduleModal(id){{scheduleDraftId=id;scheduleSelectedDate=todayKey();renderCalendar();document.querySelector("#schedule-title").textContent=lang==="zh"?"加入拍摄日历":"Adicionar ao calendário de gravação";document.querySelector("#schedule-note").textContent=lang==="zh"?"选择你准备拍摄这个脚本的日期。":"Escolha o dia em que pretende gravar este roteiro.";document.querySelector(".schedule-actions [data-schedule-close]").textContent=lang==="zh"?"稍后再说":"Mais tarde";document.querySelector("[data-schedule-confirm]").textContent=lang==="zh"?"加入拍摄日历":"Adicionar";document.querySelector("#schedule-modal").classList.add("active")}}
 function closeScheduleModal(){{document.querySelector("#schedule-modal").classList.remove("active");scheduleDraftId=""}}
 function renderCalendar(){{const root=document.querySelector("#calendar-grid");if(!root)return;const base=scheduleSelectedDate?new Date(`${{scheduleSelectedDate}}T00:00:00`):new Date();const first=new Date(base.getFullYear(),base.getMonth(),1);const start=new Date(first);start.setDate(first.getDate()-first.getDay());const weekdays=lang==="zh"?["日","一","二","三","四","五","六"]:["D","S","T","Q","Q","S","S"];let html=weekdays.map(w=>`<div class="calendar-weekday">${{w}}</div>`).join("");for(let i=0;i<35;i++){{const d=new Date(start);d.setDate(start.getDate()+i);const key=dayKey(d);const muted=d.getMonth()!==base.getMonth();const selected=key===scheduleSelectedDate;html+=`<button class="calendar-day ${{muted?"muted":""}} ${{selected?"selected":""}}" type="button" data-schedule-date="${{key}}">${{d.getDate()}}</button>`}}root.innerHTML=html}}
@@ -2116,8 +2341,8 @@ function renderList(sel,list){{document.querySelector(sel).innerHTML=list.length
 function masonryHtml(list){{if(!list.length)return `<section class="state card"><h3>${{t("empty")}}</h3><p class="lead">${{t("emptyText")}}</p><button class="primary" data-go="dashboard">${{t("navHome")}}</button></section>`;const groups=new Map();list.forEach(e=>{{const key=dateKey(e);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(e)}});const keys=[...groups.keys()].sort((a,b)=>b.localeCompare(a));return keys.map(key=>`<section class="date-group"><div class="date-divider">${{esc(dateLabel(key))}}</div><div class="masonry">${{groups.get(key).map(masonryCard).join("")}}</div></section>`).join("")}}
 function renderMasonry(sel,list){{document.querySelector(sel).innerHTML=masonryHtml(list)}}
 function featuredCard(e,i){{const s=statusOf(e.entry_id);const liked=ids("saved").has(e.entry_id);const tags=[ptTag(e.content_type),durationLabel(e),...(s?[ptTag(s)]:[])].filter(Boolean);const summary=preferPortugueseText(e.summary)||ptTag(e.content_type)||"";return `<section class="featured-shell"><article class="featured-card"><div class="featured-media"><img src="${{esc(scriptImage(e))}}" loading="eager" alt=""><span class="featured-badge">Recomendado agora</span><span class="featured-score">${{i+1}}/${{entries.length}}</span></div><div class="featured-body"><h2 class="featured-title">${{esc(ptTitle(e))}}</h2><p class="featured-summary">${{esc(summary)}}</p><div class="featured-tags">${{tags.map(x=>`<span class="tag">${{esc(x)}}</span>`).join("")}}</div><div class="featured-actions"><button class="featured-icon" type="button" data-status="${{liked?"":"saved"}}" data-entry="${{esc(e.entry_id)}}" aria-label="${{t("save")}}"><span class="btn-ico">${{liked?"✓":"♡"}}</span><span>${{liked?(lang==="zh"?"已收藏":"Salvo"):(lang==="zh"?"收藏":"Salvar")}}</span></button><button class="primary" type="button" data-detail="${{esc(e.entry_id)}}"><span class="btn-ico">⌕</span><span>${{lang==="zh"?"具体查看":"Ver detalhes"}}</span></button></div><button class="featured-next" type="button" data-feature-next><span class="btn-ico">→</span><span>${{lang==="zh"?"查看下一个脚本":"Ver proximo roteiro"}}</span></button></div></article><button class="view-all-card" type="button" data-go="all-scripts"><b>${{lang==="zh"?"查看全部推荐脚本":"Ver todos os roteiros recomendados"}}</b><span>${{lang==="zh"?"打开双列瀑布流，集中浏览全部脚本。":"Abrir a lista em duas colunas para explorar tudo."}}</span></button></section>`}}
-async function ensure(limit=48){{if(!entries.length||entriesLoadedKey!==recommendationKey()||entriesLoadedLimit<limit)await loadEntries(limit)}} async function renderDashboard(){{document.querySelector("#dashboard-feed").innerHTML=`<section class="state card"><h3>Loading...</h3></section>`;try{{await ensure(48);if(!entries.length){{renderMasonry("#dashboard-feed",entries);return}}const featuredIndex=((featuredOffset%entries.length)+entries.length)%entries.length;document.querySelector("#dashboard-feed").innerHTML=featuredCard(entries[featuredIndex],featuredIndex)}}catch(e){{document.querySelector("#dashboard-feed").innerHTML=`<section class="state card"><h3>Erro</h3></section>`}}}}
-async function renderAllScripts(){{document.querySelector("#all-title").textContent=lang==="zh"?"全部推荐脚本":"Todos os roteiros";document.querySelector("#all-feed").innerHTML=`<section class="state card"><h3>Loading...</h3></section>`;try{{await ensure(500);renderMasonry("#all-feed",entries)}}catch(e){{document.querySelector("#all-feed").innerHTML=`<section class="state card"><h3>Erro</h3></section>`}}}}
+async function ensure(limit=48){{if(!entries.length||entriesLoadedKey!==recommendationKey()||entriesLoadedLimit<limit)await loadEntries(limit)}} async function renderDashboard(){{document.querySelector("#dashboard-feed").innerHTML=`<section class="state card"><h3>Loading...</h3></section>`;try{{await ensure(48);if(!entries.length){{renderMasonry("#dashboard-feed",entries);return}}const featuredIndex=((featuredOffset%entries.length)+entries.length)%entries.length;document.querySelector("#dashboard-feed").innerHTML=featuredCard(entries[featuredIndex],featuredIndex);track("featured_script_view",{{script_id:entries[featuredIndex]?.entry_id,index:featuredIndex}})}}catch(e){{document.querySelector("#dashboard-feed").innerHTML=`<section class="state card"><h3>Erro</h3></section>`}}}}
+async function renderAllScripts(){{document.querySelector("#all-title").textContent=lang==="zh"?"全部推荐脚本":"Todos os roteiros";document.querySelector("#all-feed").innerHTML=`<section class="state card"><h3>Loading...</h3></section>`;try{{await ensure(500);renderMasonry("#all-feed",entries);track("all_scripts_view",{{count:entries.length}});trackScripts("script_impression",entries.slice(0,40),{{surface:"all_scripts"}})}}catch(e){{document.querySelector("#all-feed").innerHTML=`<section class="state card"><h3>Erro</h3></section>`}}}}
 async function loadSubmissions(){{try{{const r=await fetch(`/api/creator/submissions?_=${{Date.now()}}`);const d=await r.json();submissions=Array.isArray(d.submissions)?d.submissions:[]}}catch(e){{submissions=[]}}return submissions}}
 function submissionTime(s){{const raw=String(s.created_at||"");const d=new Date(raw);if(Number.isNaN(d.getTime()))return raw;return lang==="zh"?`回传时间：${{d.toLocaleString("zh-CN",{{hour12:false}})}}`:`Enviado em ${{d.toLocaleString("pt-BR",{{hour12:false}})}}`}}
 function submissionCard(s){{const img=esc(s.thumbnail_url||`/api/creator/thumbnail/${{s.entry_id}}.webp`);const title=esc(s.submitted_title||s.script_title||"Video enviado");const url=esc(s.video_url||"#");return `<a class="submission-card" href="${{url}}" target="_blank" rel="noopener"><img class="submission-cover" src="${{img}}" loading="lazy" alt=""><div><h3 class="submission-title">${{title}}</h3><div class="submission-time">${{esc(submissionTime(s))}}</div><div class="submission-url">${{url}}</div></div></a>`}}
@@ -2161,12 +2386,12 @@ function insightSection(title,cards){{cards=uniqueCards(cards);if(!cards.length)
 function cleanScriptHtml(raw,e){{const d=extractScriptData(raw,e);const fallbackPointCards=d.points.map((x,i)=>({{title:i===0?"Ponto-chave":"Ponto-chave "+(i+1),body:x}}));const fallbackAdaptCards=d.adaptable.map((x,i)=>({{title:i===0?"Plano de substituição":"Plano "+(i+1),body:x}}));const brief=[{{label:"Video original",value:d.original}},{{label:"Conteúdo principal",value:d.main}}].filter(x=>x.value);const segs=d.segments.slice(0,9);const storyboard=storyboardImage(e);return `<article class="script-html"><div class="clean-script"><section class="brief-list">${{brief.map(x=>`<div class="brief-card"><b>${{esc(x.label)}}</b><p>${{esc(x.value)}}</p></div>`).join("")}}</section>${{insightSection("Pontos-chave",d.pointCards.length?d.pointCards:fallbackPointCards)}}${{insightSection("Planos de substituição",d.adaptableCards.length?d.adaptableCards:fallbackAdaptCards)}}${{segs.length?`<section class="script-table-card"><div class="script-table-title">Tabela do roteiro</div><div class="script-shot-list">${{scriptTableRows(segs,storyboard)}}</div></section>`:""}}</div></article>`}}
 function renderScriptSlot(html,e){{return html?cleanScriptHtml(html,e):`<article class="script-html"><div class="clean-script"><div class="brief-card"><b>Conteúdo principal</b><p>${{esc(preferPortugueseText(e.summary)||"")}}</p></div></div></article>`}}
 function renderDetail(e){{const s=statusOf(e.entry_id);const liked=ids("saved").has(e.entry_id);document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><div class="detail-content">${{detailCover(e)}}<h2 class="detail-title">${{esc(ptTitle(e))}}</h2><div class="tags"><span class="tag">${{esc(ptTag(e.content_type))}}</span>${{durationLabel(e)?`<span class="tag">${{esc(durationLabel(e))}}</span>`:""}}${{s?`<span class="tag">${{esc(ptTag(s))}}</span>`:""}}</div><div class="share-box" id="share-output"></div><div id="script-html-slot">${{e.script_html?renderScriptSlot(e.script_html,e):scriptLoading()}}</div>${{videoPreview(e)}}<section class="submit"><b>${{t("submitTitle")}}</b><p class="lead">${{t("submitHint")}}</p><input type="url" data-submit-url="${{esc(e.entry_id)}}" placeholder="${{t("submitPlaceholder")}}"><button class="primary" data-submit="${{esc(e.entry_id)}}">${{t("submitButton")}}</button><div id="submit-status-${{esc(e.entry_id)}}"></div></section><div class="social-actions"><button class="social-btn" type="button" data-status="${{liked?"":"saved"}}" data-entry="${{esc(e.entry_id)}}" aria-label="${{t("save")}}">♡<span>${{liked?(lang==="zh"?"已收藏":"Salvo"):(lang==="zh"?"收藏":"Salvar")}}</span></button><button class="social-btn" type="button" data-copy-share="${{esc(e.entry_id)}}" aria-label="${{lang==="zh"?"复制分享链接":"Copiar link"}}">↗<span>${{lang==="zh"?"分享":"Compartilhar"}}</span></button></div></div>`}}
-function loadDetailHtml(e){{if(e.script_html)return;setTimeout(async()=>{{try{{const html=await fetchScriptHtml(e.entry_id);const slot=document.querySelector("#script-html-slot");if(slot)slot.innerHTML=renderScriptSlot(html,e)}}catch(err){{const slot=document.querySelector("#script-html-slot");if(slot)slot.innerHTML=renderScriptSlot("",{{...e,summary:e.summary||err.message}})}}}},300)}}
-async function openDetail(id){{const modal=document.querySelector("#modal");modal.classList.add("active");const local=entry(id);if(local){{renderDetail(local);hydrateVideo(local);loadDetailHtml(local);return}}document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><section class="state card"><h3>${{lang==="zh"?"正在加载脚本..." :"Carregando roteiro..."}}</h3></section>`;try{{const e=await fetchScript(id);renderDetail(e);hydrateVideo(e);loadDetailHtml(e)}}catch(err){{document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><section class="state card"><h3>${{lang==="zh"?"脚本加载失败":"Falha ao carregar"}}</h3><p>${{esc(err.message)}}</p></section>`}}}}
-async function submitVideo(id){{const input=document.querySelector(`[data-submit-url="${{id}}"]`);const status=document.querySelector(`#submit-status-${{id}}`);const video_url=String(input?.value||"").trim();if(!video_url){{status.textContent=t("submitError");return}}status.textContent=lang==="zh"?"提交中...":"Enviando...";try{{const r=await fetch("/api/creator/submissions",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{entry_id:id,video_url,creator_id:creatorUser?.account_id||creatorUser?.phone||"creator"}})}});if(!r.ok)throw new Error();status.textContent=t("submitOk");await loadSubmissions();setStatus(id,"finished");savedTab="finished"}}catch(e){{status.textContent=t("submitError")}}}}
+function loadDetailHtml(e){{if(e.script_html)return;setTimeout(async()=>{{try{{const html=await fetchScriptHtml(e.entry_id);track("script_html_loaded",{{script_id:e.entry_id,ok:true}});const slot=document.querySelector("#script-html-slot");if(slot)slot.innerHTML=renderScriptSlot(html,e)}}catch(err){{track("script_html_loaded",{{script_id:e.entry_id,ok:false,error:String(err.message||err)}});const slot=document.querySelector("#script-html-slot");if(slot)slot.innerHTML=renderScriptSlot("",{{...e,summary:e.summary||err.message}})}}}},300)}}
+async function openDetail(id){{track("script_detail_view",{{script_id:id}});const modal=document.querySelector("#modal");modal.classList.add("active");const local=entry(id);if(local){{renderDetail(local);hydrateVideo(local);loadDetailHtml(local);return}}document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><section class="state card"><h3>${{lang==="zh"?"正在加载脚本..." :"Carregando roteiro..."}}</h3></section>`;try{{const e=await fetchScript(id);renderDetail(e);hydrateVideo(e);loadDetailHtml(e)}}catch(err){{document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><section class="state card"><h3>${{lang==="zh"?"脚本加载失败":"Falha ao carregar"}}</h3><p>${{esc(err.message)}}</p></section>`}}}}
+async function submitVideo(id){{const input=document.querySelector(`[data-submit-url="${{id}}"]`);const status=document.querySelector(`#submit-status-${{id}}`);const video_url=String(input?.value||"").trim();if(!video_url){{status.textContent=t("submitError");return}}status.textContent=lang==="zh"?"提交中...":"Enviando...";try{{const r=await fetch("/api/creator/submissions",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{entry_id:id,video_url,creator_id:creatorUser?.account_id||creatorUser?.phone||"creator"}})}});const d=await r.json().catch(()=>({{}}));if(!r.ok)throw new Error();track("submission_create",{{script_id:id,video_url,submission_id:d.submission?.submission_id||""}});status.textContent=t("submitOk");await loadSubmissions();setStatus(id,"finished");savedTab="finished"}}catch(e){{status.textContent=t("submitError")}}}}
 function closeDetail(){{document.querySelectorAll("#modal video").forEach(v=>{{try{{v.pause();v.removeAttribute("src");v.load()}}catch(e){{}}}});document.querySelector("#modal").classList.remove("active");document.querySelector("#detail").innerHTML=""}}
 function handleProfileImage(kind,file){{if(!file||!file.type.startsWith("image/"))return;const reader=new FileReader();reader.onload=()=>{{profileUi[kind]=String(reader.result||"");saveProfileUi();updateProfileImages()}};reader.readAsDataURL(file)}}
-document.addEventListener("click",async e=>{{if(e.target.closest("[data-logout]")){{logout();return}}if(e.target.closest("[data-feature-next]")){{featuredOffset++;renderDashboard();return}}const upload=e.target.closest("[data-upload-trigger]");if(upload){{document.querySelector(`#profile-${{upload.dataset.uploadTrigger}}-input`)?.click();return}}const jump=e.target.closest("[data-tab-jump]");if(jump){{savedTab=jump.dataset.tabJump;show("saved");return}}const authOpen=e.target.closest("[data-auth-open]");if(authOpen){{openAuth(authOpen.dataset.authOpen||"login");return}}if(e.target.closest("[data-auth-close]")){{closeAuth();return}}const authToggle=e.target.closest("[data-auth-toggle]");if(authToggle){{setAuthMode(authMode==="register"?"login":"register");return}}const reselect=e.target.closest("[data-reselect]");if(reselect){{show("choose");return}}const stepNav=e.target.closest("[data-step]");if(stepNav){{step=Number(stepNav.dataset.step)||0;renderQuestion();return}}if(e.target.closest("#prev-step")){{goStep(-1);return}}const tab=e.target.closest("[data-tab]");if(tab){{savedTab=tab.dataset.tab;renderSaved();return}}const shootMonth=e.target.closest("[data-shoot-month]");if(shootMonth){{shiftScheduleMonth(Number(shootMonth.dataset.shootMonth)||0);return}}const shootDate=e.target.closest("[data-shoot-date]");if(shootDate){{scheduleViewDate=shootDate.dataset.shootDate;renderScheduleFeed();return}}const d=e.target.closest("[data-detail]");if(d){{openDetail(d.dataset.detail);return}}if(e.target.closest("[data-close]")||e.target.id==="modal"){{closeDetail();return}}const copy=e.target.closest("[data-copy-share]");if(copy){{const id=copy.dataset.copyShare;const ok=await copyText(shareUrl(id));showShareLink(id,ok);const label=copy.querySelector("span");if(label)label.textContent=ok?(lang==="zh"?"已复制":"Copiado"):(lang==="zh"?"复制失败，请手动复制":"Copie manualmente");return}}const scrollSubmit=e.target.closest("[data-submit-scroll]");if(scrollSubmit){{document.querySelector(`[data-submit-url="${{scrollSubmit.dataset.submitScroll}}"]`)?.scrollIntoView({{behavior:"smooth",block:"center"}});return}}const sub=e.target.closest("[data-submit]");if(sub){{submitVideo(sub.dataset.submit);return}}const st=e.target.closest("[data-status]");if(st){{const inDetail=!!st.closest("#detail");setStatus(st.dataset.entry,st.dataset.status);if(inDetail){{const fresh=entry(st.dataset.entry);if(fresh)renderDetail(fresh)}}else{{const label=st.querySelector("span");if(label)label.textContent=t(st.dataset.status==="saved"?"saved":st.dataset.status==="planned"?"plan":"save")}}return}}const go=e.target.closest("[data-go]");if(go){{if(go.dataset.savedTab)savedTab=go.dataset.savedTab;show(go.dataset.go);return}}const ans=e.target.closest("[data-answer]");if(ans){{const q=questions.find(item=>item.id===ans.dataset.answer);if(isMultipleQuestion(q)){{const values=answerValues(q.id);answers[q.id]=values.includes(ans.dataset.value)?values.filter(v=>v!==ans.dataset.value):[...values,ans.dataset.value];normalizeAnswers();saveProfile();renderQuestion();}}else{{answers[ans.dataset.answer]=ans.dataset.value;normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard");}}return}}if(e.target.closest("#next-step")){{normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard")}}}});
+document.addEventListener("click",async e=>{{if(e.target.closest("[data-logout]")){{logout();return}}if(e.target.closest("[data-feature-next]")){{featuredOffset++;track("featured_next",{{offset:featuredOffset}});renderDashboard();return}}const upload=e.target.closest("[data-upload-trigger]");if(upload){{document.querySelector(`#profile-${{upload.dataset.uploadTrigger}}-input`)?.click();return}}const jump=e.target.closest("[data-tab-jump]");if(jump){{savedTab=jump.dataset.tabJump;show("saved");return}}const authOpen=e.target.closest("[data-auth-open]");if(authOpen){{openAuth(authOpen.dataset.authOpen||"login");return}}if(e.target.closest("[data-auth-close]")){{closeAuth();return}}const authToggle=e.target.closest("[data-auth-toggle]");if(authToggle){{setAuthMode(authMode==="register"?"login":"register");return}}const reselect=e.target.closest("[data-reselect]");if(reselect){{show("choose");return}}const stepNav=e.target.closest("[data-step]");if(stepNav){{step=Number(stepNav.dataset.step)||0;track("preference_step_jump",{{step}});renderQuestion();return}}if(e.target.closest("#prev-step")){{track("preference_step_prev",{{step}});goStep(-1);return}}const tab=e.target.closest("[data-tab]");if(tab){{savedTab=tab.dataset.tab;renderSaved();return}}const shootMonth=e.target.closest("[data-shoot-month]");if(shootMonth){{shiftScheduleMonth(Number(shootMonth.dataset.shootMonth)||0);return}}const shootDate=e.target.closest("[data-shoot-date]");if(shootDate){{scheduleViewDate=shootDate.dataset.shootDate;renderScheduleFeed();return}}const d=e.target.closest("[data-detail]");if(d){{openDetail(d.dataset.detail);return}}if(e.target.closest("[data-close]")||e.target.id==="modal"){{closeDetail();return}}const copy=e.target.closest("[data-copy-share]");if(copy){{const id=copy.dataset.copyShare;const ok=await copyText(shareUrl(id));track("share_copy",{{script_id:id,ok}});showShareLink(id,ok);const label=copy.querySelector("span");if(label)label.textContent=ok?(lang==="zh"?"已复制":"Copiado"):(lang==="zh"?"复制失败，请手动复制":"Copie manualmente");return}}const scrollSubmit=e.target.closest("[data-submit-scroll]");if(scrollSubmit){{document.querySelector(`[data-submit-url="${{scrollSubmit.dataset.submitScroll}}"]`)?.scrollIntoView({{behavior:"smooth",block:"center"}});return}}const sub=e.target.closest("[data-submit]");if(sub){{submitVideo(sub.dataset.submit);return}}const videoBox=e.target.closest("[data-video-box]");if(videoBox){{track("original_video_click",{{script_id:videoBox.dataset.videoBox,video_url:videoBox.dataset.videoSrc||""}});return}}const st=e.target.closest("[data-status]");if(st){{const inDetail=!!st.closest("#detail");setStatus(st.dataset.entry,st.dataset.status);if(inDetail){{const fresh=entry(st.dataset.entry);if(fresh)renderDetail(fresh)}}else{{const label=st.querySelector("span");if(label)label.textContent=t(st.dataset.status==="saved"?"saved":st.dataset.status==="planned"?"plan":"save")}}return}}const go=e.target.closest("[data-go]");if(go){{if(go.dataset.savedTab)savedTab=go.dataset.savedTab;show(go.dataset.go);return}}const ans=e.target.closest("[data-answer]");if(ans){{const q=questions.find(item=>item.id===ans.dataset.answer);if(isMultipleQuestion(q)){{const values=answerValues(q.id);answers[q.id]=values.includes(ans.dataset.value)?values.filter(v=>v!==ans.dataset.value):[...values,ans.dataset.value];normalizeAnswers();saveProfile();track("preference_select",{{question:q.id,value:ans.dataset.value,multiple:true,answers}});renderQuestion();}}else{{answers[ans.dataset.answer]=ans.dataset.value;normalizeAnswers();saveProfile();track("preference_select",{{question:ans.dataset.answer,value:ans.dataset.value,multiple:false,answers}});if(!goStep(1))show("dashboard");}}return}}if(e.target.closest("#next-step")){{normalizeAnswers();saveProfile();track("preference_step_next",{{step,answers}});if(!goStep(1))show("dashboard")}}}});
 document.addEventListener("click",e=>{{const dateBtn=e.target.closest("[data-schedule-date]");if(dateBtn){{scheduleSelectedDate=dateBtn.dataset.scheduleDate;renderCalendar();return}}if(e.target.closest("[data-schedule-close]")){{closeScheduleModal();return}}if(e.target.closest("[data-schedule-confirm]")){{if(scheduleDraftId){{saveScheduleItem(scheduleDraftId,scheduleSelectedDate||todayKey());savedTab="schedule";closeScheduleModal();show("saved")}}return}}}});document.addEventListener("click",e=>{{const st=e.target.closest("[data-status]");if(st&&st.dataset.status==="saved"){{const id=st.dataset.entry;setTimeout(()=>openScheduleModal(id),80)}}}});
 document.querySelector("#auth-form").addEventListener("submit",handleAuthSubmit);
 document.querySelector("#profile-avatar-input")?.addEventListener("change",e=>handleProfileImage("avatar",e.target.files?.[0]));
@@ -2384,6 +2609,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Script not found."}, status=404)
                 return
             self.send_json({"entry_id": entry_id, "video_source_url": video_source_url(entry), "video_url": abs_url(entry.get("video_url"), "")})
+            return
+        if parsed.path == "/api/admin/analytics":
+            if not self.require_admin():
+                return
+            q = urllib.parse.parse_qs(parsed.query)
+            try:
+                days = int((q.get("days") or ["14"])[0] or "14")
+            except Exception:
+                days = 14
+            self.send_json(build_creator_analytics(days))
             return
         if parsed.path == "/api/admin/submissions":
             if not self.require_admin():
@@ -2616,6 +2851,13 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
             return
+        if parsed.path == "/api/creator/events":
+            try:
+                event = save_creator_event(self.read_body(), self.headers, self.client_address)
+                self.send_json({"ok": True, "event_id": event.get("event_id")}, status=201)
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+            return
         if parsed.path == "/api/creator/intake":
             try:
                 self.send_json({"ok": True, "intake": save_intake(self.read_body())}, status=201)
@@ -2628,7 +2870,17 @@ class Handler(BaseHTTPRequestHandler):
                 account = current_account(self.headers)
                 if account:
                     payload["creator_id"] = str(account.get("account_id") or "")
-                self.send_json({"ok": True, "submission": save_submission(payload)}, status=201)
+                submission = save_submission(payload)
+                try:
+                    save_creator_event({
+                        "event": "submission_create",
+                        "script_id": submission.get("entry_id") or payload.get("entry_id"),
+                        "creator_id": submission.get("creator_id") or payload.get("creator_id"),
+                        "meta": {"video_url": submission.get("video_url"), "submission_id": submission.get("submission_id")},
+                    }, self.headers, self.client_address)
+                except Exception:
+                    pass
+                self.send_json({"ok": True, "submission": submission}, status=201)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
             return
