@@ -70,6 +70,14 @@ DEFAULT_ALLOWED_ACCOUNTS = [
 DEFAULT_CONTENT_TYPE = "朋友整蛊"
 CANONICAL_CONTENT_TYPES = ["夫妻整蛊/冲突", "夫妻暧昧", "家庭整蛊", "朋友整蛊"]
 UNKNOWN_CONTENT_TYPES = {"待分类", "A classificar", "Sem categoria", "未分类", "", "Popular", "热门", "还没想好，给我热门"}
+SEED_METADATA_FIELDS = [
+    "location_tag",
+    "location_tag_pt",
+    "location_tag_confidence",
+    "location_tag_source",
+    "location_tag_reasoning",
+    "location_tag_options_version",
+]
 
 
 QUESTIONS = [
@@ -535,8 +543,39 @@ def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "entry": public_admin_entry(imported), "share_url": f"/script/{entry_id}"}
 
 
+def seed_entry_metadata() -> dict[str, dict[str, Any]]:
+    metadata: dict[str, dict[str, Any]] = {}
+    for path in [SEED_LIBRARY_FILE, SEED_MANUAL_LIBRARY_FILE]:
+        data = read_json_file(path, [])
+        if not isinstance(data, list):
+            continue
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = str(entry.get("entry_id") or "").strip()
+            if not entry_id:
+                continue
+            values = {field: entry.get(field) for field in SEED_METADATA_FIELDS if entry.get(field)}
+            if values:
+                metadata[entry_id] = {**metadata.get(entry_id, {}), **values}
+    return metadata
+
+
+def with_seed_metadata(entry: dict[str, Any], seed_metadata: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    entry_id = str(entry.get("entry_id") or "").strip()
+    extra = seed_metadata.get(entry_id) if entry_id else None
+    if not isinstance(extra, dict) or not extra:
+        return entry
+    merged = dict(entry)
+    for field, value in extra.items():
+        if value and not merged.get(field):
+            merged[field] = value
+    return merged
+
+
 def load_entries_raw() -> list[dict[str, Any]]:
     sync_library(False)
+    seed_metadata = seed_entry_metadata()
     manual = read_json_file(MANUAL_LIBRARY_FILE, [])
     manual_entries = [entry for entry in manual if isinstance(entry, dict)] if isinstance(manual, list) else []
     seed_manual = read_json_file(SEED_MANUAL_LIBRARY_FILE, [])
@@ -553,7 +592,7 @@ def load_entries_raw() -> list[dict[str, Any]]:
             continue
         if entry_id:
             seen.add(entry_id)
-        entries.append(entry)
+        entries.append(with_seed_metadata(entry, seed_metadata))
     return entries
 
 
