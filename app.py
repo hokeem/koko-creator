@@ -36,6 +36,7 @@ SUBMISSIONS_FILE = DATA_ROOT / "creator_submissions.json"
 INTAKE_FILE = DATA_ROOT / "creator_intake_submissions.json"
 CREATORS_FILE = DATA_ROOT / "creator_profiles.json"
 ACCOUNTS_FILE = DATA_ROOT / "creator_accounts.json"
+ANALYTICS_FILE = DATA_ROOT / "creator_analytics_events.json"
 THUMB_CACHE_FILE = DATA_ROOT / "creator_thumbnail_cache.json"
 VIDEO_SOURCE_CACHE_FILE = DATA_ROOT / "creator_video_source_cache.json"
 SCRIPT_HTML_CACHE_DIR = DATA_ROOT / "creator_script_html_cache"
@@ -48,6 +49,7 @@ SYNC_INTERVAL_SEC = int(os.environ.get("CREATOR_LIBRARY_SYNC_INTERVAL_SEC", "864
 ADMIN_PASSWORD = os.environ.get("KOKO_CREATOR_ADMIN_PASSWORD", "koko")
 ADMIN_COOKIE = "koko_creator_admin"
 CREATOR_AUTH_COOKIE = "koko_creator_auth"
+VISITOR_COOKIE = "koko_creator_visitor"
 DEFAULT_ALLOWED_ACCOUNTS = [
     "88996177106",
     "13996855249",
@@ -1335,6 +1337,20 @@ def load_accounts() -> list[dict[str, Any]]:
         accounts = []
     seen = {str(item.get("account_id") or "") for item in accounts if isinstance(item, dict)}
     changed = False
+    now = now_iso()
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        source = str(account.get("source") or "")
+        if not account.get("registration_status"):
+            account["registration_status"] = "registered" if source == "self_signup" or account.get("registered_at") else "unregistered"
+            changed = True
+        if account.get("registration_status") == "registered" and not account.get("registered_at"):
+            account["registered_at"] = str(account.get("created_at") or now)
+            changed = True
+        if account.get("registration_status") == "unregistered" and not account.get("provisioned_at"):
+            account["provisioned_at"] = str(account.get("created_at") or now)
+            changed = True
     for key in DEFAULT_ALLOWED_ACCOUNTS:
         account_id = normalize_account_key(key)
         if account_id and account_id not in seen:
@@ -1343,7 +1359,9 @@ def load_accounts() -> list[dict[str, Any]]:
                 "phone": account_id,
                 "display_name": account_id,
                 "status": "active",
-                "created_at": now_iso(),
+                "created_at": now,
+                "provisioned_at": now,
+                "registration_status": "unregistered",
                 "source": "seed",
                 "state": {},
             })
@@ -1374,7 +1392,12 @@ def public_account(account: dict[str, Any], *, include_state: bool = False) -> d
         "login_aliases": sorted(account_aliases(account)),
         "display_name": str(account.get("display_name") or account_id),
         "status": str(account.get("status") or "active"),
+        "source": str(account.get("source") or ""),
+        "registration_status": str(account.get("registration_status") or "unregistered"),
         "created_at": str(account.get("created_at") or ""),
+        "provisioned_at": str(account.get("provisioned_at") or ""),
+        "registered_at": str(account.get("registered_at") or ""),
+        "last_registered_at": str(account.get("last_registered_at") or ""),
         "updated_at": str(account.get("updated_at") or ""),
         "last_login_at": str(account.get("last_login_at") or ""),
         "saved_count": len(workspace.get("saved") or []),
@@ -1427,6 +1450,12 @@ def upsert_account(
             if uid_clean:
                 account["uid"] = uid_clean
             account["login_aliases"] = sorted(account_aliases(account).union(login_aliases))
+            if source == "self_signup":
+                account["registration_status"] = "registered"
+                account["registered_at"] = str(account.get("registered_at") or now)
+                account["last_registered_at"] = now
+            elif not account.get("registration_status"):
+                account["registration_status"] = "unregistered"
             account["updated_at"] = now
             accounts[idx] = account
             save_accounts(accounts)
@@ -1440,6 +1469,10 @@ def upsert_account(
         "display_name": display_name or clean,
         "status": "active",
         "created_at": now,
+        "provisioned_at": "" if source == "self_signup" else now,
+        "registration_status": "registered" if source == "self_signup" else "unregistered",
+        "registered_at": now if source == "self_signup" else "",
+        "last_registered_at": now if source == "self_signup" else "",
         "updated_at": now,
         "source": source,
         "state": {},
@@ -1457,6 +1490,209 @@ def current_account(headers: Any) -> dict[str, Any] | None:
     if not account or str(account.get("status") or "active") != "active":
         return None
     return account
+
+
+def mark_account_registered(account_id: str, *, action: str = "login") -> dict[str, Any] | None:
+    target = normalize_account_key(account_id)
+    accounts = load_accounts()
+    now = now_iso()
+    for idx, account in enumerate(accounts):
+        if target in account_aliases(account):
+            account["registration_status"] = "registered"
+            account["registered_at"] = str(account.get("registered_at") or now)
+            account["first_seen_at"] = str(account.get("first_seen_at") or now)
+            if action == "login":
+                account["last_login_at"] = now
+            elif action == "register":
+                account["last_registered_at"] = now
+            account["updated_at"] = now
+            accounts[idx] = account
+            save_accounts(accounts)
+            return account
+    return None
+
+
+def load_analytics_events() -> list[dict[str, Any]]:
+    events = read_json_file(ANALYTICS_FILE, [])
+    if not isinstance(events, list):
+        return []
+    return [item for item in events if isinstance(item, dict)]
+
+
+def save_analytics_events(events: list[dict[str, Any]]) -> None:
+    write_json_atomic(ANALYTICS_FILE, events[-30000:])
+
+
+def analytics_visitor_id(headers: Any) -> str:
+    visitor = normalize_account_key(cookie_value(headers, VISITOR_COOKIE))
+    return visitor or uuid4().hex
+
+
+def analytics_ip_hash(headers: Any) -> str:
+    raw = str(headers.get("X-Forwarded-For") or "").split(",", 1)[0].strip() or str(headers.get("X-Real-IP") or "")
+    if not raw:
+        return ""
+    return hashlib.sha256((raw + ADMIN_PASSWORD).encode("utf-8")).hexdigest()[:16]
+
+
+def append_analytics_event(
+    payload: dict[str, Any],
+    headers: Any,
+    *,
+    account: dict[str, Any] | None = None,
+    visitor_id: str = "",
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        payload = {}
+    account = account or current_account(headers)
+    event_name = re.sub(r"[^0-9A-Za-z_.:-]+", "", str(payload.get("event") or "event"))[:80] or "event"
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    script_id = normalize_account_key(str(payload.get("script_id") or meta.get("script_id") or ""))
+    if script_id and not re.fullmatch(r"[0-9a-f]{32}", script_id):
+        script_id = ""
+    try:
+        duration_ms = max(0, min(12 * 60 * 60 * 1000, int(float(payload.get("duration_ms") or 0))))
+    except Exception:
+        duration_ms = 0
+    event = {
+        "event_id": uuid4().hex,
+        "event": event_name,
+        "created_at": now_iso(),
+        "account_id": str(account.get("account_id") or "") if account else "",
+        "display_name": str(account.get("display_name") or "") if account else "",
+        "visitor_id": visitor_id or analytics_visitor_id(headers),
+        "path": str(payload.get("path") or "")[:260],
+        "page_type": str(payload.get("page_type") or "")[:80],
+        "script_id": script_id,
+        "duration_ms": duration_ms,
+        "meta": {str(k)[:60]: str(v)[:240] for k, v in meta.items()},
+        "referer": str(headers.get("Referer") or "")[:300],
+        "user_agent": str(headers.get("User-Agent") or "")[:260],
+        "ip_hash": analytics_ip_hash(headers),
+    }
+    events = load_analytics_events()
+    events.append(event)
+    save_analytics_events(events)
+    return event
+
+
+def parse_iso_time(value: object) -> datetime | None:
+    try:
+        text = str(value or "")
+        if not text:
+            return None
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def event_in_days(event: dict[str, Any], days: int) -> bool:
+    created = parse_iso_time(event.get("created_at"))
+    if not created:
+        return True
+    return created >= datetime.now(timezone.utc) - timedelta(days=days)
+
+
+CLICK_EVENT_LABELS = {
+    "feature_next": "查看下一个脚本",
+    "detail_open": "展开脚本",
+    "save_click": "收藏",
+    "share_click": "复制分享链接",
+    "submit_click": "点击回传入口",
+    "submission_created": "完成回传",
+    "all_scripts_open": "查看全部推荐脚本",
+    "profile_open": "进入个人中心",
+    "login": "登录",
+    "register": "注册",
+}
+
+
+def submission_matches_account(submission: dict[str, Any], account: dict[str, Any]) -> bool:
+    aliases = account_aliases(account)
+    creator_id = normalize_account_key(str(submission.get("creator_id") or ""))
+    detected_kwai = normalize_kwai_id(str(submission.get("detected_kwai_id") or ""))
+    video_kwai = normalize_kwai_id(kwai_handle_from_url(str(submission.get("video_url") or "")))
+    return bool(
+        (creator_id and creator_id in aliases)
+        or (detected_kwai and detected_kwai in aliases)
+        or (video_kwai and video_kwai in aliases)
+    )
+
+
+def script_title_for_id(entry_id: str) -> str:
+    entry = entry_by_id(entry_id)
+    return str(entry.get("title") or "") if entry else ""
+
+
+def creator_analytics_payload(days: int = 30) -> dict[str, Any]:
+    days = max(1, min(180, int(days or 30)))
+    accounts = load_accounts()
+    events = [event for event in load_analytics_events() if event_in_days(event, days)]
+    submissions_raw = read_json_file(SUBMISSIONS_FILE, [])
+    submissions = enrich_submission_records(submissions_raw if isinstance(submissions_raw, list) else [])
+    users: list[dict[str, Any]] = []
+    for account in accounts:
+        account_id = str(account.get("account_id") or "")
+        user_events = [event for event in events if str(event.get("account_id") or "") == account_id]
+        user_submissions = [item for item in submissions if submission_matches_account(item, account)]
+        clicks: dict[str, int] = {}
+        script_stats: dict[str, dict[str, Any]] = {}
+        platform_open_count = 0
+        script_open_count = 0
+        platform_duration_ms = 0
+        script_duration_ms = 0
+        for event in user_events:
+            name = str(event.get("event") or "")
+            page_type = str(event.get("page_type") or "")
+            script_id = str(event.get("script_id") or "")
+            if name == "page_view":
+                if page_type == "script" or script_id:
+                    script_open_count += 1
+                else:
+                    platform_open_count += 1
+            if name == "page_duration":
+                duration_ms = int(event.get("duration_ms") or 0)
+                if page_type == "script" or script_id:
+                    script_duration_ms += duration_ms
+                    if script_id:
+                        row = script_stats.setdefault(script_id, {"script_id": script_id, "title": script_title_for_id(script_id), "views": 0, "duration_ms": 0})
+                        row["duration_ms"] = int(row.get("duration_ms") or 0) + duration_ms
+                else:
+                    platform_duration_ms += duration_ms
+            if name in CLICK_EVENT_LABELS:
+                clicks[name] = clicks.get(name, 0) + 1
+            if script_id and name == "page_view":
+                row = script_stats.setdefault(script_id, {"script_id": script_id, "title": script_title_for_id(script_id), "views": 0, "duration_ms": 0})
+                row["views"] = int(row.get("views") or 0) + 1
+        users.append({
+            **public_account(account, include_state=False),
+            "platform_open_count": platform_open_count,
+            "script_share_open_count": script_open_count,
+            "platform_duration_seconds": round(platform_duration_ms / 1000),
+            "script_duration_seconds": round(script_duration_ms / 1000),
+            "click_counts": clicks,
+            "click_labels": CLICK_EVENT_LABELS,
+            "script_views": sorted(script_stats.values(), key=lambda item: (int(item.get("views") or 0), int(item.get("duration_ms") or 0)), reverse=True)[:20],
+            "submission_count": len(user_submissions),
+            "submissions": user_submissions[:30],
+            "last_event_at": max([str(event.get("created_at") or "") for event in user_events] or [""]),
+            "recent_events": sorted(user_events, key=lambda item: str(item.get("created_at") or ""), reverse=True)[:30],
+        })
+    users.sort(key=lambda item: (item.get("registration_status") == "registered", str(item.get("last_event_at") or ""), int(item.get("platform_open_count") or 0) + int(item.get("script_share_open_count") or 0)), reverse=True)
+    return {
+        "ok": True,
+        "days": days,
+        "summary": {
+            "accounts": len(users),
+            "registered": sum(1 for item in users if item.get("registration_status") == "registered"),
+            "unregistered": sum(1 for item in users if item.get("registration_status") != "registered"),
+            "events": len(events),
+            "submissions": len(submissions),
+            "platform_opens": sum(int(item.get("platform_open_count") or 0) for item in users),
+            "script_opens": sum(int(item.get("script_share_open_count") or 0) for item in users),
+        },
+        "users": users,
+    }
 
 
 def update_account_state(account_id: str, state_patch: dict[str, Any]) -> dict[str, Any]:
@@ -2076,6 +2312,13 @@ let profileUi=JSON.parse(localStorage.getItem(profileUiKey)||"null")||{{avatar:"
 let scheduleDraftId=""; let scheduleSelectedDate=""; let scheduleViewDate=todayKey();
 const initialScriptId=(()=>{{const path=location.pathname.match(/^\\/script\\/([0-9a-f]{{32}})$/);if(path)return path[1];return new URLSearchParams(location.search).get("script")||""}})();
 const forceLanding=new URLSearchParams(location.search).get("landing")==="1";
+let analyticsCurrentScriptId=initialScriptId||"";
+const analyticsSessionId=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():String(Date.now())+"-"+String(Math.random()).slice(2);
+let analyticsLastDurationAt=Date.now();
+function analyticsPageType(){{return analyticsCurrentScriptId?"script":(document.querySelector(".view.active")?.dataset.view||"portal")}}
+function track(event,meta){{try{{const payload={{event:event,path:location.pathname+location.search,page_type:analyticsPageType(),script_id:analyticsCurrentScriptId,duration_ms:0,meta:Object.assign({{session_id:analyticsSessionId}},meta||{{}})}};fetch("/api/analytics/events",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify(payload),keepalive:true}}).catch(()=>null)}}catch(e){{}}}}
+function trackDuration(finalSend){{try{{const now=Date.now();const duration=Math.max(0,now-analyticsLastDurationAt);if(duration<1500&&!finalSend)return;analyticsLastDurationAt=now;const payload={{event:"page_duration",path:location.pathname+location.search,page_type:analyticsPageType(),script_id:analyticsCurrentScriptId,duration_ms:duration,meta:{{session_id:analyticsSessionId,final:finalSend?"1":"0"}}}};const raw=JSON.stringify(payload);if(finalSend&&navigator.sendBeacon){{navigator.sendBeacon("/api/analytics/events",new Blob([raw],{{type:"application/json"}}));return}}fetch("/api/analytics/events",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:raw,keepalive:true}}).catch(()=>null)}}catch(e){{}}}}
+window.addEventListener("beforeunload",()=>trackDuration(true));setInterval(()=>trackDuration(false),30000);
 const I={{pt:{{homePill:"Biblioteca de roteiros",homeTitle:"Encontre roteiros que você consegue gravar",homeLead:"Responda 3 perguntas e veja roteiros para o seu estilo.",start:"Começar agora",seePopular:"Ver populares",todayPill:"Recomendação de roteiros",todayTitle:"Recomendação de roteiros",todayLead:"Abra e escolha um roteiro para ver os detalhes.",quickNew:"roteiros",quickSaved:"salvos",quickPlan:"para gravar",next:"Próxima etapa",prev:"Etapa anterior",finish:"Ver recomendações",libraryPill:"Biblioteca",libraryTitle:"Sua biblioteca recomendada",savedPill:"Meus roteiros",savedTitle:"Sua lista de gravação",navHome:"Roteiros",navLibrary:"Biblioteca",navSaved:"Eu",navPrefs:"Perfil",changePrefs:"Mudar preferências",editCover:"Editar capa",editAvatar:"Editar avatar",logout:"Sair",profileBio:"Biblioteca pessoal de roteiros e gravações.",profileHome:"Início",open:"Abrir",save:"Salvar",plan:"Vou gravar",done:"Gravado",reject:"Não serve",original:"Referencia",details:"Detalhes",submitTitle:"Enviar vídeo gravado",submitHint:"Envie o link do vídeo gravado seguindo este roteiro. Vamos revisar e, se aprovado, ajudar com impulsionamento.",submitPlaceholder:"Cole aqui o link do seu vídeo",submitButton:"Enviar para revisão",submitOk:"Recebido. Vamos revisar seu vídeo.",submitError:"Não foi possível enviar. Confira o link.",empty:"Nada aqui ainda",emptyText:"Salve um roteiro da recomendação para montar sua lista.",statusSaved:"Salvos",statusPlanned:"Vou gravar",statusFinished:"Gravados",statusRejected:"Não servem",step:"Etapa"}},zh:{{homePill:"脚本推荐",homeTitle:"找到你真的能拍的脚本",homeLead:"回答 3 个问题，进入你的推荐脚本页面。",start:"开始选择",seePopular:"先看热门",todayPill:"脚本推荐",todayTitle:"脚本推荐",todayLead:"点开卡片，查看完整脚本和拍摄说明。",quickNew:"推荐脚本",quickSaved:"已收藏",quickPlan:"准备拍",next:"下一步",prev:"上一步",finish:"查看推荐",libraryPill:"脚本库",libraryTitle:"你的推荐脚本库",savedPill:"我的脚本",savedTitle:"你的拍摄清单",navHome:"脚本推荐",navLibrary:"脚本库",navSaved:"我",navPrefs:"偏好",changePrefs:"重新选择偏好",editCover:"编辑封面",editAvatar:"编辑头像",logout:"退出登录",profileBio:"你的脚本收藏和视频回传记录。",profileHome:"主页",open:"打开",save:"收藏",plan:"准备拍",done:"已拍",reject:"不适合",original:"参考视频",details:"完整脚本",submitTitle:"回传拍摄视频",submitHint:"上传按照脚本拍摄的视频，我们会审核后给您投流。",submitPlaceholder:"把你发布后的视频链接粘贴在这里",submitButton:"提交审核",submitOk:"已收到，我们会审核这个视频。",submitError:"提交失败，请检查链接。",empty:"这里还没有脚本",emptyText:"先从脚本推荐里收藏一个脚本。",statusSaved:"收藏",statusPlanned:"准备拍",statusFinished:"已拍",statusRejected:"不适合",step:"第"}}}};
 const t=k=>(I.pt&&I.pt[k])||k; const label=x=>x.pt||x.zh||""; const esc=v=>String(v||"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[c]));
 function answerValues(qid){{const v=answers[qid];return Array.isArray(v)?v:(v?[v]:[])}}
@@ -2102,13 +2345,13 @@ function openAuth(mode="login"){{setAuthStep(mode==="register"?"register":"login
 function closeAuth(){{document.querySelector("#auth-modal").classList.remove("active")}}
 async function loadAccountState(){{if(!creatorUser)return null;try{{const r=await fetch(`/api/me/state?_=${{Date.now()}}`);const d=await r.json();if(r.status===401){{creatorUser=null;localStorage.removeItem(authKey);return null}}if(!r.ok)throw new Error(d.error||"state failed");creatorUser=d.account||creatorUser;localStorage.setItem(authKey,JSON.stringify(creatorUser));const state=d.state||{{}};if(state.preferences){{answers=state.preferences;localStorage.setItem(profileKey,JSON.stringify(answers))}}if(state.workspace){{workspace=state.workspace;if(!workspace.schedule||Array.isArray(workspace.schedule))workspace.schedule={{}};localStorage.setItem(workspaceKey,JSON.stringify(workspace))}}if(state.profile_ui){{profileUi=state.profile_ui;localStorage.setItem(profileUiKey,JSON.stringify(profileUi))}}submissions=Array.isArray(d.submissions)?d.submissions:submissions;return d}}catch(err){{return null}}}}
 let persistTimer=null;function persistAccountState(){{if(!creatorUser)return;if(persistTimer)clearTimeout(persistTimer);persistTimer=setTimeout(async()=>{{try{{await fetch("/api/me/state",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{preferences:answers,workspace,profile_ui:profileUi,language:lang}})}})}}catch(err){{}}}},260)}}
-async function handleAuthSubmit(e){{e.preventDefault();const form=new FormData(e.currentTarget);const phone=String(form.get("phone")||"").replace(/\\s+/g,"").trim();const c=authCopy();if(!phone){{alert(c.missing);return}}try{{if(authMode==="register"){{const r=await fetch("/api/auth/register",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{phone}})}});const d=await r.json();if(!r.ok)throw new Error(d.error||c.registerFailed);alert(c.registered);setAuthStep("login");document.querySelector("#auth-phone").value=phone;return}}if(authMode==="profile"){{const kwai_id=String(form.get("kwai_id")||"").trim();const display_name=String(form.get("display_name")||"").trim();if(!kwai_id){{alert(c.kwaiMissing);return}}const r=await fetch("/api/me/profile",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{kwai_id,display_name}})}});const d=await r.json();if(!r.ok)throw new Error(d.error||c.notFound);creatorUser=d.account;localStorage.setItem(authKey,JSON.stringify(creatorUser));await loadAccountState();updateCreatorName();closeAuth();if(!hasProfile())show("choose");else show("dashboard");return}}const r=await fetch("/api/auth/login",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{phone}})}});const d=await r.json();if(!r.ok)throw new Error(d.error||c.notFound);creatorUser=d.account;localStorage.setItem(authKey,JSON.stringify(creatorUser));await loadAccountState();updateCreatorName();closeAuth();if(!hasProfile())show("choose");else show("dashboard")}}catch(err){{alert(err.message||c.notFound)}}}}
+async function handleAuthSubmit(e){{e.preventDefault();const form=new FormData(e.currentTarget);const phone=String(form.get("phone")||"").replace(/\\s+/g,"").trim();const c=authCopy();if(!phone){{alert(c.missing);return}}try{{if(authMode==="register"){{const r=await fetch("/api/auth/register",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{phone}})}});const d=await r.json();if(!r.ok)throw new Error(d.error||c.registerFailed);alert(c.registered);setAuthStep("login");document.querySelector("#auth-phone").value=phone;return}}if(authMode==="profile"){{const kwai_id=String(form.get("kwai_id")||"").trim();const display_name=String(form.get("display_name")||"").trim();if(!kwai_id){{alert(c.kwaiMissing);return}}const r=await fetch("/api/me/profile",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{kwai_id,display_name}})}});const d=await r.json();if(!r.ok)throw new Error(d.error||c.notFound);creatorUser=d.account;localStorage.setItem(authKey,JSON.stringify(creatorUser));await loadAccountState();updateCreatorName();closeAuth();track("page_view",{{source:"after_profile"}});if(!hasProfile())show("choose");else show("dashboard");return}}const r=await fetch("/api/auth/login",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{phone}})}});const d=await r.json();if(!r.ok)throw new Error(d.error||c.notFound);creatorUser=d.account;localStorage.setItem(authKey,JSON.stringify(creatorUser));await loadAccountState();updateCreatorName();closeAuth();track("page_view",{{source:"after_login"}});if(!hasProfile())show("choose");else show("dashboard")}}catch(err){{alert(err.message||c.notFound)}}}}
 async function logout(){{creatorUser=null;localStorage.removeItem(authKey);await fetch("/api/auth/logout",{{method:"POST",body:"{{}}"}}).catch(()=>null);closeDetail();closeAuth();show("home")}}
 function ids(k){{return new Set(workspace[k]||[])}} function statusOf(id){{return ids("planned").has(id)?"planned":ids("finished").has(id)?"finished":ids("rejected").has(id)?"rejected":ids("saved").has(id)?"saved":""}} function entry(id){{return entries.find(e=>e.entry_id===id)}}
 function setStatus(id,status){{["saved","planned","finished","rejected"].forEach(k=>workspace[k]=(workspace[k]||[]).filter(x=>x!==id)); if(status) workspace[status]=[...(workspace[status]||[]),id]; saveWorkspace(); renderCurrent()}}
 function counts(){{const n=document.querySelector("#count-new");if(n)n.textContent=String(entries.length);const s=document.querySelector("#count-saved");if(s)s.textContent=String((workspace.saved||[]).length);const p=document.querySelector("#count-planned");if(p)p.textContent=String((workspace.planned||[]).length);updateProfileHeader()}}
 function applyLang(){{document.documentElement.lang="pt-BR";document.querySelectorAll("[data-t]").forEach(n=>n.textContent=t(n.dataset.t));document.querySelectorAll("[data-html]").forEach(n=>n.innerHTML=t(n.dataset.html));renderQuestion();renderCurrent();counts();setAuthMode(authMode)}}
-function show(v){{if(v==="library")v="dashboard";if(["dashboard","saved","all-scripts"].includes(v)&&(!creatorUser||!hasProfile()))v="home";if(v==="choose"&&!creatorUser)v="home";if(v==="choose")step=0;document.querySelectorAll("[data-view]").forEach(x=>x.classList.toggle("active",x.dataset.view===v));if(v==="choose")renderQuestion();if(v==="dashboard")renderDashboard();if(v==="all-scripts")renderAllScripts();if(v==="saved")renderSaved();document.querySelectorAll(".bottom button").forEach(b=>b.classList.toggle("active",b.dataset.go===v||v==="all-scripts"&&b.dataset.go==="dashboard"));scrollTo({{top:0,behavior:"smooth"}})}}
+function show(v){{if(v==="library")v="dashboard";if(["dashboard","saved","all-scripts"].includes(v)&&(!creatorUser||!hasProfile()))v="home";if(v==="choose"&&!creatorUser)v="home";if(v==="choose")step=0;if(v!=="detail"&&!initialScriptId)analyticsCurrentScriptId="";document.querySelectorAll("[data-view]").forEach(x=>x.classList.toggle("active",x.dataset.view===v));if(v==="choose")renderQuestion();if(v==="dashboard")renderDashboard();if(v==="all-scripts")renderAllScripts();if(v==="saved")renderSaved();document.querySelectorAll(".bottom button").forEach(b=>b.classList.toggle("active",b.dataset.go===v||v==="all-scripts"&&b.dataset.go==="dashboard"));scrollTo({{top:0,behavior:"smooth"}})}}
 function renderQuestion(){{normalizeAnswers();if(!stepAvailable(step)){{const first=questions.findIndex((_,i)=>stepAvailable(i));step=first>=0?first:0}}const q=questions[step];const opts=optionsFor(q);const total=stepCountLabel();const pos=currentStepPosition();const multi=isMultipleQuestion(q);document.querySelector("#step-label").textContent=lang==="zh"?`${{t("step")}} ${{pos}} / ${{total}}`:`${{t("step")}} ${{pos}} de ${{total}}`;document.querySelector("#stepper").innerHTML=questions.map((_,i)=>stepAvailable(i)?`<button class="step ${{i===step?"active":""}}" type="button" data-step="${{i}}">${{questions.slice(0,i+1).filter((_,j)=>stepAvailable(j)).length}}</button>`:"").join("");document.querySelector("#question").innerHTML=`<h1>${{esc(label(q))}}</h1>${{multi?`<p class="lead">${{lang==="zh"?"可以多选，Koko 会把这些时长的脚本合并推荐。":"Pode escolher mais de uma duração. A Koko mistura esses roteiros na recomendação."}}</p>`:""}}<div class="options">${{opts.map(o=>`<button class="option ${{answerValues(q.id).includes(o.id)?"selected":""}}" data-answer="${{q.id}}" data-value="${{o.id}}">${{esc(label(o))}}</button>`).join("")}}</div>${{multi?`<button class="primary question-submit" type="button" id="next-step"><span>${{t("finish")}}</span></button>`:""}}`;const next=document.querySelector("#next-step span");if(next)next.textContent=nextAvailableAfter(step)<0?t("finish"):t("next");const prev=document.querySelector("#prev-step");if(prev){{prev.style.visibility=questions.slice(0,step).some((_,i)=>stepAvailable(i))?"visible":"hidden";prev.disabled=prev.style.visibility==="hidden"}}}}
 function entryTimestamp(e){{const raw=e.script_date||e.created_at||e.saved_at||"";const n=Date.parse(raw);return Number.isNaN(n)?0:n}}
 let entriesLoadedLimit=0;let entriesLoadedKey="";
@@ -2183,28 +2426,30 @@ function cleanScriptHtml(raw,e){{const d=extractScriptData(raw,e);const fallback
 function renderScriptSlot(html,e){{return html?cleanScriptHtml(html,e):`<article class="script-html"><div class="clean-script"><div class="brief-card"><b>Conteúdo principal</b><p>${{esc(preferPortugueseText(e.summary)||"")}}</p></div></div></article>`}}
 function renderDetail(e){{const s=statusOf(e.entry_id);const liked=ids("saved").has(e.entry_id);document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><div class="detail-content">${{detailCover(e)}}<h2 class="detail-title">${{esc(ptTitle(e))}}</h2><div class="tags"><span class="tag">${{esc(ptTag(e.content_type))}}</span>${{durationLabel(e)?`<span class="tag">${{esc(durationLabel(e))}}</span>`:""}}${{s?`<span class="tag">${{esc(ptTag(s))}}</span>`:""}}</div><div class="share-box" id="share-output"></div><div id="script-html-slot">${{e.script_html?renderScriptSlot(e.script_html,e):scriptLoading()}}</div>${{videoPreview(e)}}<section class="submit"><b>${{t("submitTitle")}}</b><p class="lead">${{t("submitHint")}}</p><input type="url" data-submit-url="${{esc(e.entry_id)}}" placeholder="${{t("submitPlaceholder")}}"><button class="primary" data-submit="${{esc(e.entry_id)}}">${{t("submitButton")}}</button><div id="submit-status-${{esc(e.entry_id)}}"></div></section><div class="social-actions"><button class="social-btn" type="button" data-status="${{liked?"":"saved"}}" data-entry="${{esc(e.entry_id)}}" aria-label="${{t("save")}}">♡<span>${{liked?(lang==="zh"?"已收藏":"Salvo"):(lang==="zh"?"收藏":"Salvar")}}</span></button><button class="social-btn" type="button" data-copy-share="${{esc(e.entry_id)}}" aria-label="${{lang==="zh"?"复制分享链接":"Copiar link"}}">↗<span>${{lang==="zh"?"分享":"Compartilhar"}}</span></button></div></div>`}}
 function loadDetailHtml(e){{if(e.script_html)return;setTimeout(async()=>{{try{{const html=await fetchScriptHtml(e.entry_id);const slot=document.querySelector("#script-html-slot");if(slot)slot.innerHTML=renderScriptSlot(html,e)}}catch(err){{const slot=document.querySelector("#script-html-slot");if(slot)slot.innerHTML=renderScriptSlot("",{{...e,summary:e.summary||err.message}})}}}},300)}}
-async function openDetail(id){{const modal=document.querySelector("#modal");modal.classList.add("active");const local=entry(id);if(local){{renderDetail(local);hydrateVideo(local);loadDetailHtml(local);return}}document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><section class="state card"><h3>${{lang==="zh"?"正在加载脚本..." :"Carregando roteiro..."}}</h3></section>`;try{{const e=await fetchScript(id);renderDetail(e);hydrateVideo(e);loadDetailHtml(e)}}catch(err){{document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><section class="state card"><h3>${{lang==="zh"?"脚本加载失败":"Falha ao carregar"}}</h3><p>${{esc(err.message)}}</p></section>`}}}}
+async function openDetail(id){{analyticsCurrentScriptId=id||"";const modal=document.querySelector("#modal");modal.classList.add("active");const local=entry(id);if(local){{renderDetail(local);hydrateVideo(local);loadDetailHtml(local);return}}document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><section class="state card"><h3>${{lang==="zh"?"正在加载脚本..." :"Carregando roteiro..."}}</h3></section>`;try{{const e=await fetchScript(id);renderDetail(e);hydrateVideo(e);loadDetailHtml(e)}}catch(err){{document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><section class="state card"><h3>${{lang==="zh"?"脚本加载失败":"Falha ao carregar"}}</h3><p>${{esc(err.message)}}</p></section>`}}}}
 async function submitVideo(id){{const input=document.querySelector(`[data-submit-url="${{id}}"]`);const status=document.querySelector(`#submit-status-${{id}}`);const video_url=String(input?.value||"").trim();if(!creatorUser){{if(status)status.textContent=lang==="zh"?"请先用手机号登录。":"Entre com seu telefone primeiro.";openAuth("login");return}}if(!video_url){{status.textContent=t("submitError");return}}status.textContent=lang==="zh"?"提交中...":"Enviando...";try{{const r=await fetch("/api/creator/submissions",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{entry_id:id,video_url,creator_id:creatorUser?.account_id||creatorUser?.phone||"creator"}})}});if(!r.ok)throw new Error();status.textContent=t("submitOk");await loadSubmissions();setStatus(id,"finished");savedTab="finished"}}catch(e){{status.textContent=t("submitError")}}}}
-function closeDetail(){{document.querySelectorAll("#modal video").forEach(v=>{{try{{v.pause();v.removeAttribute("src");v.load()}}catch(e){{}}}});document.querySelector("#modal").classList.remove("active");document.querySelector("#detail").innerHTML=""}}
+function closeDetail(){{trackDuration(true);analyticsCurrentScriptId="";document.querySelectorAll("#modal video").forEach(v=>{{try{{v.pause();v.removeAttribute("src");v.load()}}catch(e){{}}}});document.querySelector("#modal").classList.remove("active");document.querySelector("#detail").innerHTML=""}}
 function handleProfileImage(kind,file){{if(!file||!file.type.startsWith("image/"))return;const reader=new FileReader();reader.onload=()=>{{profileUi[kind]=String(reader.result||"");saveProfileUi();updateProfileImages()}};reader.readAsDataURL(file)}}
-document.addEventListener("click",async e=>{{if(e.target.closest("[data-logout]")){{logout();return}}if(e.target.closest("[data-feature-next]")){{featuredOffset++;renderDashboard();return}}const upload=e.target.closest("[data-upload-trigger]");if(upload){{document.querySelector(`#profile-${{upload.dataset.uploadTrigger}}-input`)?.click();return}}const jump=e.target.closest("[data-tab-jump]");if(jump){{savedTab=jump.dataset.tabJump;show("saved");return}}const authOpen=e.target.closest("[data-auth-open]");if(authOpen){{openAuth(authOpen.dataset.authOpen||"login");return}}if(e.target.closest("[data-auth-close]")){{closeAuth();return}}const authToggle=e.target.closest("[data-auth-toggle]");if(authToggle){{setAuthMode(authMode==="register"?"login":"register");return}}const reselect=e.target.closest("[data-reselect]");if(reselect){{show("choose");return}}const stepNav=e.target.closest("[data-step]");if(stepNav){{step=Number(stepNav.dataset.step)||0;renderQuestion();return}}if(e.target.closest("#prev-step")){{goStep(-1);return}}const tab=e.target.closest("[data-tab]");if(tab){{savedTab=tab.dataset.tab;renderSaved();return}}const shootMonth=e.target.closest("[data-shoot-month]");if(shootMonth){{shiftScheduleMonth(Number(shootMonth.dataset.shootMonth)||0);return}}const shootDate=e.target.closest("[data-shoot-date]");if(shootDate){{scheduleViewDate=shootDate.dataset.shootDate;renderScheduleFeed();return}}const d=e.target.closest("[data-detail]");if(d){{openDetail(d.dataset.detail);return}}if(e.target.closest("[data-close]")||e.target.id==="modal"){{closeDetail();return}}const copy=e.target.closest("[data-copy-share]");if(copy){{const id=copy.dataset.copyShare;const ok=await copyText(shareUrl(id));showShareLink(id,ok);const label=copy.querySelector("span");if(label)label.textContent=ok?(lang==="zh"?"已复制":"Copiado"):(lang==="zh"?"复制失败，请手动复制":"Copie manualmente");return}}const scrollSubmit=e.target.closest("[data-submit-scroll]");if(scrollSubmit){{document.querySelector(`[data-submit-url="${{scrollSubmit.dataset.submitScroll}}"]`)?.scrollIntoView({{behavior:"smooth",block:"center"}});return}}const sub=e.target.closest("[data-submit]");if(sub){{submitVideo(sub.dataset.submit);return}}const st=e.target.closest("[data-status]");if(st){{const inDetail=!!st.closest("#detail");setStatus(st.dataset.entry,st.dataset.status);if(inDetail){{const fresh=entry(st.dataset.entry);if(fresh)renderDetail(fresh)}}else{{const label=st.querySelector("span");if(label)label.textContent=t(st.dataset.status==="saved"?"saved":st.dataset.status==="planned"?"plan":"save")}}return}}const go=e.target.closest("[data-go]");if(go){{if(go.dataset.savedTab)savedTab=go.dataset.savedTab;show(go.dataset.go);return}}const ans=e.target.closest("[data-answer]");if(ans){{const q=questions.find(item=>item.id===ans.dataset.answer);if(isMultipleQuestion(q)){{const values=answerValues(q.id);answers[q.id]=values.includes(ans.dataset.value)?values.filter(v=>v!==ans.dataset.value):[...values,ans.dataset.value];normalizeAnswers();saveProfile();renderQuestion();}}else{{answers[ans.dataset.answer]=ans.dataset.value;normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard");}}return}}if(e.target.closest("#next-step")){{normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard")}}}});
+document.addEventListener("click",async e=>{{if(e.target.closest("[data-logout]")){{logout();return}}if(e.target.closest("[data-feature-next]")){{track("feature_next");featuredOffset++;renderDashboard();return}}const upload=e.target.closest("[data-upload-trigger]");if(upload){{document.querySelector(`#profile-${{upload.dataset.uploadTrigger}}-input`)?.click();return}}const jump=e.target.closest("[data-tab-jump]");if(jump){{savedTab=jump.dataset.tabJump;show("saved");return}}const authOpen=e.target.closest("[data-auth-open]");if(authOpen){{openAuth(authOpen.dataset.authOpen||"login");return}}if(e.target.closest("[data-auth-close]")){{closeAuth();return}}const authToggle=e.target.closest("[data-auth-toggle]");if(authToggle){{setAuthMode(authMode==="register"?"login":"register");return}}const reselect=e.target.closest("[data-reselect]");if(reselect){{show("choose");return}}const stepNav=e.target.closest("[data-step]");if(stepNav){{step=Number(stepNav.dataset.step)||0;renderQuestion();return}}if(e.target.closest("#prev-step")){{goStep(-1);return}}const tab=e.target.closest("[data-tab]");if(tab){{savedTab=tab.dataset.tab;renderSaved();return}}const shootMonth=e.target.closest("[data-shoot-month]");if(shootMonth){{shiftScheduleMonth(Number(shootMonth.dataset.shootMonth)||0);return}}const shootDate=e.target.closest("[data-shoot-date]");if(shootDate){{scheduleViewDate=shootDate.dataset.shootDate;renderScheduleFeed();return}}const d=e.target.closest("[data-detail]");if(d){{track("detail_open",{{script_id:d.dataset.detail||""}});openDetail(d.dataset.detail);return}}if(e.target.closest("[data-close]")||e.target.id==="modal"){{closeDetail();return}}const copy=e.target.closest("[data-copy-share]");if(copy){{const id=copy.dataset.copyShare;track("share_click",{{script_id:id}});const ok=await copyText(shareUrl(id));showShareLink(id,ok);const label=copy.querySelector("span");if(label)label.textContent=ok?(lang==="zh"?"已复制":"Copiado"):(lang==="zh"?"复制失败，请手动复制":"Copie manualmente");return}}const scrollSubmit=e.target.closest("[data-submit-scroll]");if(scrollSubmit){{track("submit_click",{{script_id:scrollSubmit.dataset.submitScroll||""}});document.querySelector(`[data-submit-url="${{scrollSubmit.dataset.submitScroll}}"]`)?.scrollIntoView({{behavior:"smooth",block:"center"}});return}}const sub=e.target.closest("[data-submit]");if(sub){{track("submit_click",{{script_id:sub.dataset.submit||""}});submitVideo(sub.dataset.submit);return}}const st=e.target.closest("[data-status]");if(st){{if(st.dataset.status==="saved")track("save_click",{{script_id:st.dataset.entry||""}});const inDetail=!!st.closest("#detail");setStatus(st.dataset.entry,st.dataset.status);if(inDetail){{const fresh=entry(st.dataset.entry);if(fresh)renderDetail(fresh)}}else{{const label=st.querySelector("span");if(label)label.textContent=t(st.dataset.status==="saved"?"saved":st.dataset.status==="planned"?"plan":"save")}}return}}const go=e.target.closest("[data-go]");if(go){{if(go.dataset.go==="all-scripts")track("all_scripts_open");if(go.dataset.go==="saved")track("profile_open");if(go.dataset.savedTab)savedTab=go.dataset.savedTab;show(go.dataset.go);return}}const ans=e.target.closest("[data-answer]");if(ans){{const q=questions.find(item=>item.id===ans.dataset.answer);if(isMultipleQuestion(q)){{const values=answerValues(q.id);answers[q.id]=values.includes(ans.dataset.value)?values.filter(v=>v!==ans.dataset.value):[...values,ans.dataset.value];normalizeAnswers();saveProfile();renderQuestion();}}else{{answers[ans.dataset.answer]=ans.dataset.value;normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard");}}return}}if(e.target.closest("#next-step")){{normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard")}}}});
 document.addEventListener("click",e=>{{const dateBtn=e.target.closest("[data-schedule-date]");if(dateBtn){{scheduleSelectedDate=dateBtn.dataset.scheduleDate;renderCalendar();return}}if(e.target.closest("[data-schedule-close]")){{closeScheduleModal();return}}if(e.target.closest("[data-schedule-confirm]")){{if(scheduleDraftId){{saveScheduleItem(scheduleDraftId,scheduleSelectedDate||todayKey());savedTab="schedule";closeScheduleModal();show("saved")}}return}}}});document.addEventListener("click",e=>{{const st=e.target.closest("[data-status]");if(st&&st.dataset.status==="saved"){{const id=st.dataset.entry;setTimeout(()=>openScheduleModal(id),80)}}}});
 document.querySelector("#auth-form").addEventListener("submit",handleAuthSubmit);
 document.querySelector("#profile-avatar-input")?.addEventListener("change",e=>handleProfileImage("avatar",e.target.files?.[0]));
 document.querySelector("#profile-cover-input")?.addEventListener("change",e=>handleProfileImage("cover",e.target.files?.[0]));
-async function bootstrap(){{if(creatorUser)await loadAccountState();applyLang();setAuthMode("login");show(forceLanding?"home":initialScriptId?"dashboard":creatorUser&&hasProfile()?"dashboard":"home");if(initialScriptId){{openDetail(initialScriptId);if(!creatorUser)setTimeout(()=>openAuth("login"),260)}}}}bootstrap();
+async function bootstrap(){{if(creatorUser)await loadAccountState();applyLang();setAuthMode("login");show(forceLanding?"home":initialScriptId?"dashboard":creatorUser&&hasProfile()?"dashboard":"home");track("page_view",{{source:initialScriptId?"share_script":"portal"}});if(initialScriptId){{openDetail(initialScriptId);if(!creatorUser)setTimeout(()=>openAuth("login"),260)}}}}bootstrap();
 </script></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "KokoCreator/1.0"
 
-    def send_json(self, payload: Any, status: int = 200) -> None:
+    def send_json(self, payload: Any, status: int = 200, headers: list[tuple[str, str]] | None = None) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        for key, value in headers or []:
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -2416,6 +2661,16 @@ class Handler(BaseHTTPRequestHandler):
             unmatched_count = sum(1 for item in enriched if item.get("creator_unmatched"))
             self.send_json({"ok": True, "submissions": enriched, "total": len(enriched), "unmatched_count": unmatched_count})
             return
+        if parsed.path == "/api/admin/analytics":
+            if not self.require_admin():
+                return
+            q = urllib.parse.parse_qs(parsed.query)
+            try:
+                days = max(1, min(180, int((q.get("days") or ["30"])[0] or "30")))
+            except Exception:
+                days = 30
+            self.send_json(creator_analytics_payload(days))
+            return
         if parsed.path == "/api/admin/intakes":
             if not self.require_admin():
                 return
@@ -2509,6 +2764,19 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(raw)
             return
+        if parsed.path == "/api/analytics/events":
+            try:
+                payload = self.read_body()
+            except Exception:
+                payload = {}
+            visitor_id = analytics_visitor_id(self.headers)
+            event = append_analytics_event(payload, self.headers, visitor_id=visitor_id)
+            self.send_json(
+                {"ok": True, "event_id": event.get("event_id")},
+                status=201,
+                headers=[("Set-Cookie", f"{VISITOR_COOKIE}={urllib.parse.quote(visitor_id)}; Path=/; Max-Age=31536000; SameSite=Lax")],
+            )
+            return
         if parsed.path == "/api/auth/login":
             try:
                 payload = self.read_body()
@@ -2526,14 +2794,8 @@ class Handler(BaseHTTPRequestHandler):
             if not account or str(account.get("status") or "active") != "active":
                 self.send_json({"error": "Conta desativada"}, status=403)
                 return
-            accounts = load_accounts()
-            for idx, item in enumerate(accounts):
-                if account_id in account_aliases(item):
-                    item["last_login_at"] = now_iso()
-                    accounts[idx] = item
-                    account = item
-                    save_accounts(accounts)
-                    break
+            account = mark_account_registered(account_id, action="login") or account
+            append_analytics_event({"event": "login", "page_type": "auth", "path": parsed.path}, self.headers, account=account)
             public = public_account(account, include_state=True)
             raw = json.dumps({
                 "ok": True,
@@ -2565,6 +2827,8 @@ class Handler(BaseHTTPRequestHandler):
                 display_name=account_id,
                 phone=raw_phone,
             )
+            account = mark_account_registered(account_id, action="register") or find_account(account_id)
+            append_analytics_event({"event": "register", "page_type": "auth", "path": parsed.path}, self.headers, account=account)
             self.send_json({"ok": True, "account": {k: v for k, v in public.items() if k != "state"}}, status=201)
             return
         if parsed.path == "/api/auth/logout":
@@ -2697,7 +2961,13 @@ class Handler(BaseHTTPRequestHandler):
                 account = current_account(self.headers)
                 if account:
                     payload["creator_id"] = str(account.get("account_id") or "")
-                self.send_json({"ok": True, "submission": save_submission(payload)}, status=201)
+                submission = save_submission(payload)
+                append_analytics_event(
+                    {"event": "submission_created", "page_type": "script", "script_id": submission.get("entry_id"), "path": parsed.path},
+                    self.headers,
+                    account=account,
+                )
+                self.send_json({"ok": True, "submission": submission}, status=201)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
             return
