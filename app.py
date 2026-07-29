@@ -1631,6 +1631,7 @@ def creator_analytics_payload(days: int = 30) -> dict[str, Any]:
     submissions_raw = read_json_file(SUBMISSIONS_FILE, [])
     submissions = enrich_submission_records(submissions_raw if isinstance(submissions_raw, list) else [])
     users: list[dict[str, Any]] = []
+    inactive_users: list[dict[str, Any]] = []
     for account in accounts:
         account_id = str(account.get("account_id") or "")
         user_events = [event for event in events if str(event.get("account_id") or "") == account_id]
@@ -1664,6 +1665,23 @@ def creator_analytics_payload(days: int = 30) -> dict[str, Any]:
             if script_id and name == "page_view":
                 row = script_stats.setdefault(script_id, {"script_id": script_id, "title": script_title_for_id(script_id), "views": 0, "duration_ms": 0})
                 row["views"] = int(row.get("views") or 0) + 1
+        has_behavior = bool(
+            user_events
+            or user_submissions
+            or str(account.get("registration_status") or "") == "registered"
+            or account.get("registered_at")
+            or account.get("last_login_at")
+        )
+        if not has_behavior:
+            inactive_users.append({
+                "account_id": account_id,
+                "phone": str(account.get("phone") or account_id),
+                "display_name": str(account.get("display_name") or account_id),
+                "registration_status": str(account.get("registration_status") or "unregistered"),
+                "created_at": str(account.get("created_at") or ""),
+                "provisioned_at": str(account.get("provisioned_at") or ""),
+            })
+            continue
         users.append({
             **public_account(account, include_state=False),
             "platform_open_count": platform_open_count,
@@ -1679,19 +1697,23 @@ def creator_analytics_payload(days: int = 30) -> dict[str, Any]:
             "recent_events": sorted(user_events, key=lambda item: str(item.get("created_at") or ""), reverse=True)[:30],
         })
     users.sort(key=lambda item: (item.get("registration_status") == "registered", str(item.get("last_event_at") or ""), int(item.get("platform_open_count") or 0) + int(item.get("script_share_open_count") or 0)), reverse=True)
+    inactive_users.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
     return {
         "ok": True,
         "days": days,
         "summary": {
-            "accounts": len(users),
+            "accounts": len(accounts),
+            "active_accounts": len(users),
+            "inactive_accounts": len(inactive_users),
             "registered": sum(1 for item in users if item.get("registration_status") == "registered"),
-            "unregistered": sum(1 for item in users if item.get("registration_status") != "registered"),
+            "unregistered": sum(1 for item in accounts if str(item.get("registration_status") or "unregistered") != "registered"),
             "events": len(events),
             "submissions": len(submissions),
             "platform_opens": sum(int(item.get("platform_open_count") or 0) for item in users),
             "script_opens": sum(int(item.get("script_share_open_count") or 0) for item in users),
         },
         "users": users,
+        "inactive_users": inactive_users,
     }
 
 
