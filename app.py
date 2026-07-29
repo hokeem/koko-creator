@@ -1624,17 +1624,27 @@ def script_title_for_id(entry_id: str) -> str:
     return str(entry.get("title") or "") if entry else ""
 
 
-def creator_analytics_payload(days: int = 30) -> dict[str, Any]:
+def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False) -> dict[str, Any]:
     days = max(1, min(180, int(days or 30)))
     accounts = load_accounts()
     events = [event for event in load_analytics_events() if event_in_days(event, days)]
     submissions_raw = read_json_file(SUBMISSIONS_FILE, [])
-    submissions = enrich_submission_records(submissions_raw if isinstance(submissions_raw, list) else [])
+    submissions = [item for item in (submissions_raw if isinstance(submissions_raw, list) else []) if isinstance(item, dict)]
+    events_by_account: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        events_by_account.setdefault(str(event.get("account_id") or ""), []).append(event)
+    title_cache: dict[str, str] = {}
+
+    def cached_script_title(entry_id: str) -> str:
+        if entry_id not in title_cache:
+            title_cache[entry_id] = script_title_for_id(entry_id)
+        return title_cache[entry_id]
+
     users: list[dict[str, Any]] = []
     inactive_users: list[dict[str, Any]] = []
     for account in accounts:
         account_id = str(account.get("account_id") or "")
-        user_events = [event for event in events if str(event.get("account_id") or "") == account_id]
+        user_events = events_by_account.get(account_id, [])
         user_submissions = [item for item in submissions if submission_matches_account(item, account)]
         clicks: dict[str, int] = {}
         script_stats: dict[str, dict[str, Any]] = {}
@@ -1656,14 +1666,14 @@ def creator_analytics_payload(days: int = 30) -> dict[str, Any]:
                 if page_type == "script" or script_id:
                     script_duration_ms += duration_ms
                     if script_id:
-                        row = script_stats.setdefault(script_id, {"script_id": script_id, "title": script_title_for_id(script_id), "views": 0, "duration_ms": 0})
+                        row = script_stats.setdefault(script_id, {"script_id": script_id, "title": cached_script_title(script_id), "views": 0, "duration_ms": 0})
                         row["duration_ms"] = int(row.get("duration_ms") or 0) + duration_ms
                 else:
                     platform_duration_ms += duration_ms
             if name in CLICK_EVENT_LABELS:
                 clicks[name] = clicks.get(name, 0) + 1
             if script_id and name == "page_view":
-                row = script_stats.setdefault(script_id, {"script_id": script_id, "title": script_title_for_id(script_id), "views": 0, "duration_ms": 0})
+                row = script_stats.setdefault(script_id, {"script_id": script_id, "title": cached_script_title(script_id), "views": 0, "duration_ms": 0})
                 row["views"] = int(row.get("views") or 0) + 1
         has_behavior = bool(
             user_events
@@ -1682,8 +1692,26 @@ def creator_analytics_payload(days: int = 30) -> dict[str, Any]:
                 "provisioned_at": str(account.get("provisioned_at") or ""),
             })
             continue
+        state = account.get("state") if isinstance(account.get("state"), dict) else {}
+        workspace = state.get("workspace") if isinstance(state, dict) and isinstance(state.get("workspace"), dict) else {}
         users.append({
-            **public_account(account, include_state=False),
+            "account_id": account_id,
+            "phone": str(account.get("phone") or account_id),
+            "kwai_id": str(account.get("kwai_id") or ""),
+            "uid": str(account.get("uid") or ""),
+            "login_aliases": sorted(account_aliases(account)),
+            "display_name": str(account.get("display_name") or account_id),
+            "status": str(account.get("status") or "active"),
+            "source": str(account.get("source") or ""),
+            "registration_status": str(account.get("registration_status") or "unregistered"),
+            "created_at": str(account.get("created_at") or ""),
+            "provisioned_at": str(account.get("provisioned_at") or ""),
+            "registered_at": str(account.get("registered_at") or ""),
+            "last_registered_at": str(account.get("last_registered_at") or ""),
+            "updated_at": str(account.get("updated_at") or ""),
+            "last_login_at": str(account.get("last_login_at") or ""),
+            "saved_count": len(workspace.get("saved") or []),
+            "scheduled_count": sum(len(v) for v in (workspace.get("schedule") or {}).values() if isinstance(v, list)) if isinstance(workspace.get("schedule"), dict) else 0,
             "platform_open_count": platform_open_count,
             "script_share_open_count": script_open_count,
             "platform_duration_seconds": round(platform_duration_ms / 1000),
@@ -1713,7 +1741,8 @@ def creator_analytics_payload(days: int = 30) -> dict[str, Any]:
             "script_opens": sum(int(item.get("script_share_open_count") or 0) for item in users),
         },
         "users": users,
-        "inactive_users": inactive_users,
+        "inactive_users": inactive_users if include_inactive else [],
+        "inactive_loaded": bool(include_inactive),
     }
 
 
@@ -2691,7 +2720,8 @@ class Handler(BaseHTTPRequestHandler):
                 days = max(1, min(180, int((q.get("days") or ["30"])[0] or "30")))
             except Exception:
                 days = 30
-            self.send_json(creator_analytics_payload(days))
+            include_inactive = (q.get("include_inactive") or ["0"])[0] == "1"
+            self.send_json(creator_analytics_payload(days, include_inactive=include_inactive))
             return
         if parsed.path == "/api/admin/intakes":
             if not self.require_admin():
