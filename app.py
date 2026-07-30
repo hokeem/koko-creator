@@ -1520,7 +1520,7 @@ def load_analytics_events() -> list[dict[str, Any]]:
 
 
 def save_analytics_events(events: list[dict[str, Any]]) -> None:
-    write_json_atomic(ANALYTICS_FILE, events[-30000:])
+    write_json_atomic(ANALYTICS_FILE, events)
 
 
 def analytics_visitor_id(headers: Any) -> str:
@@ -1637,19 +1637,18 @@ def script_title_for_id(entry_id: str) -> str:
 def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False) -> dict[str, Any]:
     days = max(1, min(180, int(days or 30)))
     accounts = load_accounts()
+    account_by_id = {str(account.get("account_id") or ""): account for account in accounts if account.get("account_id")}
     events = [event for event in load_analytics_events() if event_in_days(event, days)]
     submissions_raw = read_json_file(SUBMISSIONS_FILE, [])
     submissions = [item for item in (submissions_raw if isinstance(submissions_raw, list) else []) if isinstance(item, dict)]
-    account_by_id = {str(account.get("account_id") or ""): account for account in accounts if account.get("account_id")}
     title_cache: dict[str, str] = {}
+    timeline: dict[str, dict[str, Any]] = {}
+    detail_limit = 120
 
     def cached_script_title(entry_id: str) -> str:
         if entry_id not in title_cache:
             title_cache[entry_id] = script_title_for_id(entry_id)
         return title_cache[entry_id]
-
-    timeline: dict[str, dict[str, Any]] = {}
-    detail_limit = 120
 
     def timeline_row(bucket: str) -> dict[str, Any]:
         row = timeline.setdefault(bucket, {
@@ -1746,33 +1745,50 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
             })
 
     events_by_account: dict[str, list[dict[str, Any]]] = {}
+    events_by_visitor: dict[str, list[dict[str, Any]]] = {}
+    visitor_ids_by_account: dict[str, set[str]] = {}
     for event in events:
-        events_by_account.setdefault(str(event.get("account_id") or ""), []).append(event)
+        event_account_id = str(event.get("account_id") or "")
+        visitor_id = str(event.get("visitor_id") or "")
+        events_by_account.setdefault(event_account_id, []).append(event)
+        if visitor_id:
+            events_by_visitor.setdefault(visitor_id, []).append(event)
+        if event_account_id and visitor_id:
+            visitor_ids_by_account.setdefault(event_account_id, set()).add(visitor_id)
 
     users: list[dict[str, Any]] = []
     inactive_users: list[dict[str, Any]] = []
     for account in accounts:
         account_id = str(account.get("account_id") or "")
-        user_events = events_by_account.get(account_id, [])
+        seen_event_ids: set[str] = set()
+        user_events: list[dict[str, Any]] = []
+        for event in events_by_account.get(account_id, []):
+            event_id = str(event.get("event_id") or "")
+            if event_id and event_id in seen_event_ids:
+                continue
+            if event_id:
+                seen_event_ids.add(event_id)
+            user_events.append(event)
+        for visitor_id in visitor_ids_by_account.get(account_id, set()):
+            for event in events_by_visitor.get(visitor_id, []):
+                event_id = str(event.get("event_id") or "")
+                if event_id and event_id in seen_event_ids:
+                    continue
+                if event_id:
+                    seen_event_ids.add(event_id)
+                user_events.append(event)
         user_submissions = [item for item in submissions if submission_matches_account(item, account)]
-        registered_time = str(account.get("registered_at") or account.get("last_registered_at") or "")
-        registered_source = "账号注册"
-        first_submission_item: dict[str, Any] | None = None
-        if not registered_time and user_submissions:
-            first_submission_item = min((item for item in user_submissions if item.get("created_at")), key=lambda item: str(item.get("created_at") or ""), default=None)
-            registered_time = str(first_submission_item.get("created_at") or "") if first_submission_item else ""
-            registered_source = "首次回传计入"
-        registered_bucket = analytics_hour_bucket(registered_time)
+        registered_bucket = analytics_hour_bucket(account.get("registered_at") or account.get("last_registered_at"))
+        if not registered_bucket and user_submissions:
+            first_submission = min((str(item.get("created_at") or "") for item in user_submissions if item.get("created_at")), default="")
+            registered_bucket = analytics_hour_bucket(first_submission)
         if registered_bucket and time_value_in_days(registered_bucket):
             row = timeline_row(registered_bucket)
             row["registered_users"] = int(row.get("registered_users") or 0) + 1
             append_timeline_detail(row, "registered_details", {
-                **person_from_account(account, account_id),
-                "time": registered_time,
-                "source": registered_source,
-                "submission_url": str((first_submission_item or {}).get("video_url") or ""),
-                "script_id": str((first_submission_item or {}).get("entry_id") or ""),
-                "script_title": cached_script_title(str((first_submission_item or {}).get("entry_id") or "")) if (first_submission_item or {}).get("entry_id") else "",
+                **person_from_account(account),
+                "time": str(account.get("last_registered_at") or account.get("registered_at") or (user_submissions[0].get("created_at") if user_submissions else "")),
+                "source": "注册/首次回传",
             })
         clicks: dict[str, int] = {}
         script_stats: dict[str, dict[str, Any]] = {}
@@ -1858,13 +1874,13 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
     for row in sorted(timeline.values(), key=lambda item: str(item.get("hour") or ""), reverse=True):
         script_opens_for_hour = int(row.get("script_opens") or 0)
         duration_for_hour = int(row.get("script_duration_seconds") or 0)
-        platform_people = row.pop("_platform_people", {})
-        script_people = row.pop("_script_people", {})
-        duration_people = row.pop("_duration_people", {})
         row["koko_opens"] = int(row.get("platform_opens") or 0) + int(row.get("share_link_opens") or 0)
-        row["platform_people_count"] = len(platform_people) if isinstance(platform_people, dict) else 0
-        row["script_people_count"] = len(script_people) if isinstance(script_people, dict) else 0
-        row["duration_people_count"] = len(duration_people) if isinstance(duration_people, dict) else 0
+        row["platform_people_count"] = len(row.get("_platform_people") or {})
+        row["script_people_count"] = len(row.get("_script_people") or {})
+        row["duration_people_count"] = len(row.get("_duration_people") or {})
+        row.pop("_platform_people", None)
+        row.pop("_script_people", None)
+        row.pop("_duration_people", None)
         row["avg_script_duration_seconds"] = round(duration_for_hour / script_opens_for_hour) if script_opens_for_hour else 0
         timeline_rows.append(row)
     return {
@@ -1886,7 +1902,6 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
         "inactive_users": inactive_users if include_inactive else [],
         "inactive_loaded": bool(include_inactive),
     }
-
 
 def update_account_state(account_id: str, state_patch: dict[str, Any]) -> dict[str, Any]:
     clean = normalize_account_key(account_id)
