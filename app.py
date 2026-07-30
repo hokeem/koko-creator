@@ -1593,6 +1593,16 @@ def event_in_days(event: dict[str, Any], days: int) -> bool:
     return created >= datetime.now(timezone.utc) - timedelta(days=days)
 
 
+def analytics_hour_bucket(value: object) -> str:
+    created = parse_iso_time(value)
+    if not created:
+        return ""
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    created = created.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    return created.isoformat()
+
+
 CLICK_EVENT_LABELS = {
     "feature_next": "查看下一个脚本",
     "detail_open": "展开脚本",
@@ -1630,6 +1640,43 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
     events = [event for event in load_analytics_events() if event_in_days(event, days)]
     submissions_raw = read_json_file(SUBMISSIONS_FILE, [])
     submissions = [item for item in (submissions_raw if isinstance(submissions_raw, list) else []) if isinstance(item, dict)]
+    timeline: dict[str, dict[str, Any]] = {}
+
+    def timeline_row(bucket: str) -> dict[str, Any]:
+        row = timeline.setdefault(bucket, {
+            "hour": bucket,
+            "registered_users": 0,
+            "platform_opens": 0,
+            "share_link_opens": 0,
+            "script_opens": 0,
+            "script_duration_seconds": 0,
+        })
+        return row
+
+    def time_value_in_days(value: object) -> bool:
+        created = parse_iso_time(value)
+        if not created:
+            return False
+        return created >= datetime.now(timezone.utc) - timedelta(days=days)
+
+    for event in events:
+        bucket = analytics_hour_bucket(event.get("created_at"))
+        if not bucket:
+            continue
+        row = timeline_row(bucket)
+        name = str(event.get("event") or "")
+        page_type = str(event.get("page_type") or "")
+        script_id = str(event.get("script_id") or "")
+        is_script = page_type == "script" or bool(script_id)
+        if name == "page_view":
+            if is_script:
+                row["script_opens"] = int(row.get("script_opens") or 0) + 1
+                row["share_link_opens"] = int(row.get("share_link_opens") or 0) + 1
+            else:
+                row["platform_opens"] = int(row.get("platform_opens") or 0) + 1
+        if name == "page_duration" and is_script:
+            row["script_duration_seconds"] = int(row.get("script_duration_seconds") or 0) + round(int(event.get("duration_ms") or 0) / 1000)
+
     events_by_account: dict[str, list[dict[str, Any]]] = {}
     for event in events:
         events_by_account.setdefault(str(event.get("account_id") or ""), []).append(event)
@@ -1646,6 +1693,12 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
         account_id = str(account.get("account_id") or "")
         user_events = events_by_account.get(account_id, [])
         user_submissions = [item for item in submissions if submission_matches_account(item, account)]
+        registered_bucket = analytics_hour_bucket(account.get("registered_at") or account.get("last_registered_at"))
+        if not registered_bucket and user_submissions:
+            first_submission = min((str(item.get("created_at") or "") for item in user_submissions if item.get("created_at")), default="")
+            registered_bucket = analytics_hour_bucket(first_submission)
+        if registered_bucket and time_value_in_days(registered_bucket):
+            timeline_row(registered_bucket)["registered_users"] = int(timeline_row(registered_bucket).get("registered_users") or 0) + 1
         clicks: dict[str, int] = {}
         script_stats: dict[str, dict[str, Any]] = {}
         platform_open_count = 0
@@ -1726,9 +1779,17 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
         })
     users.sort(key=lambda item: (item.get("registration_status") == "registered", str(item.get("last_event_at") or ""), int(item.get("platform_open_count") or 0) + int(item.get("script_share_open_count") or 0)), reverse=True)
     inactive_users.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    timeline_rows = []
+    for row in sorted(timeline.values(), key=lambda item: str(item.get("hour") or ""), reverse=True):
+        script_opens_for_hour = int(row.get("script_opens") or 0)
+        duration_for_hour = int(row.get("script_duration_seconds") or 0)
+        row["koko_opens"] = int(row.get("platform_opens") or 0) + int(row.get("share_link_opens") or 0)
+        row["avg_script_duration_seconds"] = round(duration_for_hour / script_opens_for_hour) if script_opens_for_hour else 0
+        timeline_rows.append(row)
     return {
         "ok": True,
         "days": days,
+        "timeline": {"hourly": timeline_rows},
         "summary": {
             "accounts": len(accounts),
             "active_accounts": len(users),
