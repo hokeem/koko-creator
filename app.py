@@ -1020,7 +1020,7 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Script not found.")
     meta = link_metadata(video_url)
     fallback_thumb = f"/api/creator/thumbnail/{entry_id}.webp"
-    creator_id = normalize_account_key(str(payload.get("creator_id") or "local_creator"))
+    creator_id = canonical_account_key(str(payload.get("creator_id") or "local_creator"))
     detected_kwai_id = resolve_kwai_id_from_video_link(video_url, timeout=10)
     submission = {
         "submission_id": uuid4().hex,
@@ -1229,6 +1229,21 @@ def normalize_kwai_id(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z_.-]+", "", text)[:120]
 
 
+ACCOUNT_ID_REPLACEMENTS = {
+    "88992150187": "88993217658",
+}
+
+
+def canonical_account_key(value: str) -> str:
+    clean = normalize_account_key(value)
+    return ACCOUNT_ID_REPLACEMENTS.get(clean, clean)
+
+
+def legacy_aliases_for_account(account_id: str) -> set[str]:
+    clean = normalize_account_key(account_id)
+    return {old for old, new in ACCOUNT_ID_REPLACEMENTS.items() if new == clean}
+
+
 def account_aliases(account: dict[str, Any]) -> set[str]:
     aliases: set[str] = set()
     for key in ["account_id", "phone", "kwai_id", "uid"]:
@@ -1237,12 +1252,76 @@ def account_aliases(account: dict[str, Any]) -> set[str]:
             clean = normalize_account_key(value)
             if clean:
                 aliases.add(clean)
+                aliases.add(canonical_account_key(clean))
     for raw in account.get("login_aliases") or []:
         for value in [str(raw or ""), normalize_phone(str(raw or "")), normalize_kwai_id(str(raw or ""))]:
             clean = normalize_account_key(value)
             if clean:
                 aliases.add(clean)
+                aliases.add(canonical_account_key(clean))
+    aliases.update(legacy_aliases_for_account(str(account.get("account_id") or "")))
+    aliases.update(legacy_aliases_for_account(str(account.get("phone") or "")))
     return aliases
+
+
+def merge_account_dict(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key in ["display_name", "kwai_id", "uid", "status", "source", "registration_status", "created_at", "provisioned_at", "registered_at", "last_registered_at", "updated_at", "last_login_at", "first_seen_at"]:
+        if not merged.get(key) and incoming.get(key):
+            merged[key] = incoming.get(key)
+    if incoming.get("registration_status") == "registered":
+        merged["registration_status"] = "registered"
+    for key in ["registered_at", "first_seen_at", "created_at", "provisioned_at"]:
+        values = [str(merged.get(key) or ""), str(incoming.get(key) or "")]
+        values = [item for item in values if item]
+        if values:
+            merged[key] = min(values)
+    for key in ["last_registered_at", "updated_at", "last_login_at"]:
+        values = [str(merged.get(key) or ""), str(incoming.get(key) or "")]
+        values = [item for item in values if item]
+        if values:
+            merged[key] = max(values)
+    state = merged.get("state") if isinstance(merged.get("state"), dict) else {}
+    incoming_state = incoming.get("state") if isinstance(incoming.get("state"), dict) else {}
+    merged["state"] = {**incoming_state, **state}
+    aliases = account_aliases(base).union(account_aliases(incoming))
+    merged["login_aliases"] = sorted(alias for alias in aliases if alias)
+    return merged
+
+
+def migrate_account_replacements(accounts: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    migrated: dict[str, dict[str, Any]] = {}
+    changed = False
+    ordered: list[str] = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        row = dict(account)
+        raw_id = normalize_account_key(row.get("account_id") or row.get("phone") or "")
+        raw_phone = normalize_phone(row.get("phone") or raw_id)
+        canonical_id = canonical_account_key(raw_id)
+        canonical_phone = canonical_account_key(raw_phone) if raw_phone else canonical_id
+        target_id = canonical_phone if raw_phone in ACCOUNT_ID_REPLACEMENTS or raw_phone in ACCOUNT_ID_REPLACEMENTS.values() else canonical_id
+        if raw_id != target_id:
+            row["account_id"] = target_id
+            changed = True
+        if raw_phone and raw_phone != target_id and (raw_phone in ACCOUNT_ID_REPLACEMENTS or target_id in ACCOUNT_ID_REPLACEMENTS.values()):
+            row["phone"] = target_id
+            changed = True
+        row_aliases = set(row.get("login_aliases") or [])
+        row_aliases.update(alias for alias in [raw_id, raw_phone, canonical_id, canonical_phone] if alias)
+        row_aliases.update(legacy_aliases_for_account(target_id))
+        if sorted(row_aliases) != sorted(row.get("login_aliases") or []):
+            row["login_aliases"] = sorted(row_aliases)
+            changed = True
+        key = str(row.get("account_id") or target_id)
+        if key in migrated:
+            migrated[key] = merge_account_dict(migrated[key], row)
+            changed = True
+        else:
+            migrated[key] = row
+            ordered.append(key)
+    return [migrated[key] for key in ordered if key in migrated], changed
 
 
 def submission_kwai_id(submission: dict[str, Any]) -> str:
@@ -1335,8 +1414,8 @@ def load_accounts() -> list[dict[str, Any]]:
     accounts = read_json_file(ACCOUNTS_FILE, [])
     if not isinstance(accounts, list):
         accounts = []
+    accounts, changed = migrate_account_replacements(accounts)
     seen = {str(item.get("account_id") or "") for item in accounts if isinstance(item, dict)}
-    changed = False
     now = now_iso()
     for account in accounts:
         if not isinstance(account, dict):
@@ -1378,9 +1457,10 @@ def save_accounts(accounts: list[dict[str, Any]]) -> None:
 
 def public_account(account: dict[str, Any], *, include_state: bool = False) -> dict[str, Any]:
     account_id = str(account.get("account_id") or "").strip()
+    aliases = account_aliases(account)
     submissions = [
         item for item in read_json_file(SUBMISSIONS_FILE, [])
-        if isinstance(item, dict) and str(item.get("creator_id") or "") == account_id
+        if isinstance(item, dict) and normalize_account_key(str(item.get("creator_id") or "")) in aliases
     ]
     state = account.get("state") if isinstance(account.get("state"), dict) else {}
     workspace = state.get("workspace") if isinstance(state, dict) and isinstance(state.get("workspace"), dict) else {}
@@ -1411,8 +1491,8 @@ def public_account(account: dict[str, Any], *, include_state: bool = False) -> d
 
 
 def find_account(account_id: str) -> dict[str, Any] | None:
-    target = normalize_account_key(account_id)
-    phone_target = normalize_phone(account_id)
+    target = canonical_account_key(account_id)
+    phone_target = canonical_account_key(normalize_phone(account_id))
     kwai_target = normalize_kwai_id(account_id)
     for account in load_accounts():
         aliases = account_aliases(account)
@@ -1430,10 +1510,10 @@ def upsert_account(
     kwai_id: str = "",
     uid: str = "",
 ) -> dict[str, Any]:
-    clean = normalize_account_key(account_id or phone or kwai_id or uid)
+    clean = canonical_account_key(account_id or phone or kwai_id or uid)
     if not clean:
         raise ValueError("账号只能包含数字、字母、下划线、@、点或短横线。")
-    phone_clean = normalize_phone(phone or account_id)
+    phone_clean = canonical_account_key(normalize_phone(phone or account_id))
     kwai_clean = normalize_kwai_id(kwai_id)
     uid_clean = normalize_account_key(uid)
     login_aliases = sorted({item for item in [clean, phone_clean, kwai_clean, uid_clean] if item})
@@ -1493,7 +1573,7 @@ def current_account(headers: Any) -> dict[str, Any] | None:
 
 
 def mark_account_registered(account_id: str, *, action: str = "login") -> dict[str, Any] | None:
-    target = normalize_account_key(account_id)
+    target = canonical_account_key(account_id)
     accounts = load_accounts()
     now = now_iso()
     for idx, account in enumerate(accounts):
@@ -1637,7 +1717,12 @@ def script_title_for_id(entry_id: str) -> str:
 def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False) -> dict[str, Any]:
     days = max(1, min(180, int(days or 30)))
     accounts = load_accounts()
-    account_by_id = {str(account.get("account_id") or ""): account for account in accounts if account.get("account_id")}
+    account_by_id: dict[str, dict[str, Any]] = {}
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        for alias in account_aliases(account):
+            account_by_id[alias] = account
     events = [event for event in load_analytics_events() if event_in_days(event, days)]
     submissions_raw = read_json_file(SUBMISSIONS_FILE, [])
     submissions = [item for item in (submissions_raw if isinstance(submissions_raw, list) else []) if isinstance(item, dict)]
@@ -1680,7 +1765,7 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
         }
 
     def person_from_event(event: dict[str, Any]) -> dict[str, str]:
-        account_id = str(event.get("account_id") or "")
+        account_id = canonical_account_key(str(event.get("account_id") or ""))
         person = person_from_account(account_by_id.get(account_id), account_id or str(event.get("visitor_id") or ""))
         if not person.get("display_name") or person.get("display_name") == "匿名访客":
             person["display_name"] = str(event.get("display_name") or person.get("account_id") or "匿名访客")
@@ -1748,7 +1833,7 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
     events_by_visitor: dict[str, list[dict[str, Any]]] = {}
     visitor_ids_by_account: dict[str, set[str]] = {}
     for event in events:
-        event_account_id = str(event.get("account_id") or "")
+        event_account_id = canonical_account_key(str(event.get("account_id") or ""))
         visitor_id = str(event.get("visitor_id") or "")
         events_by_account.setdefault(event_account_id, []).append(event)
         if visitor_id:
@@ -1904,10 +1989,10 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
     }
 
 def update_account_state(account_id: str, state_patch: dict[str, Any]) -> dict[str, Any]:
-    clean = normalize_account_key(account_id)
+    clean = canonical_account_key(account_id)
     accounts = load_accounts()
     for idx, account in enumerate(accounts):
-        if str(account.get("account_id") or "") == clean:
+        if clean in account_aliases(account):
             state = account.get("state") if isinstance(account.get("state"), dict) else {}
             for key in ["preferences", "workspace", "profile_ui", "language"]:
                 if key in state_patch:
@@ -2026,7 +2111,22 @@ def fetch_kwai_profile(url: str) -> dict[str, Any]:
 
 def load_creator_profiles() -> list[dict[str, Any]]:
     data = read_json_file(CREATORS_FILE, [])
-    return [item for item in data if isinstance(item, dict)]
+    profiles = [item for item in data if isinstance(item, dict)]
+    changed = False
+    for profile in profiles:
+        account_id = str(profile.get("account_id") or "")
+        phone = str(profile.get("phone") or "")
+        next_account_id = canonical_account_key(account_id)
+        next_phone = canonical_account_key(normalize_phone(phone)) if phone else ""
+        if account_id and next_account_id != account_id:
+            profile["account_id"] = next_account_id
+            changed = True
+        if phone and next_phone and next_phone != phone:
+            profile["phone"] = next_phone
+            changed = True
+    if changed:
+        save_creator_profiles(profiles)
+    return profiles
 
 
 def save_creator_profiles(profiles: list[dict[str, Any]]) -> None:
@@ -3016,7 +3116,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Cache-Control", "no-store")
-            self.send_header("Set-Cookie", f"{CREATOR_AUTH_COOKIE}={urllib.parse.quote(make_account_token(account_id))}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax")
+            canonical_login_id = str(account.get("account_id") or canonical_account_key(account_id))
+            self.send_header("Set-Cookie", f"{CREATOR_AUTH_COOKIE}={urllib.parse.quote(make_account_token(canonical_login_id))}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax")
             self.end_headers()
             self.wfile.write(raw)
             return
