@@ -211,6 +211,24 @@ def first_repeated_url(value: object) -> str:
     return urls[0] if urls else text
 
 
+def normalize_submission_video_url(value: object) -> str:
+    url = first_repeated_url(value).strip()
+    if not url:
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except Exception:
+        return url.rstrip("/").lower()
+    if not parsed.scheme or not parsed.netloc:
+        return url.rstrip("/").lower()
+    path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/")
+    return urllib.parse.urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, "", ""))
+
+
+class DuplicateSubmissionError(ValueError):
+    pass
+
+
 def has_family_signal(text: str) -> bool:
     chinese_terms = ["妈妈", "爸爸", "母亲", "父亲", "儿子", "女儿", "孩子", "小孩", "宝宝", "亲戚", "婆婆", "岳母", "兄弟", "姐妹"]
     if any(term in text for term in chinese_terms):
@@ -1068,9 +1086,20 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
     entry = entry_by_id(entry_id)
     if not entry:
         raise ValueError("Script not found.")
+    normalized_video_url = normalize_submission_video_url(video_url)
     meta = link_metadata(video_url)
     fallback_thumb = f"/api/creator/thumbnail/{entry_id}.webp"
     creator_id = canonical_account_key(str(payload.get("creator_id") or "local_creator"))
+    submissions = read_json_file(SUBMISSIONS_FILE, [])
+    if not isinstance(submissions, list):
+        submissions = []
+    for existing in submissions:
+        if not isinstance(existing, dict):
+            continue
+        same_creator = canonical_account_key(str(existing.get("creator_id") or "local_creator")) == (creator_id or "local_creator")
+        same_video = normalize_submission_video_url(existing.get("video_url") or "") == normalized_video_url
+        if same_creator and same_video:
+            raise DuplicateSubmissionError("作品已上传，无需重复上传")
     detected_kwai_id = resolve_kwai_id_from_video_link(video_url, timeout=10)
     submission = {
         "submission_id": uuid4().hex,
@@ -1092,9 +1121,6 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
             "creator_profile_name": matched_creator.get("name", ""),
             "creator_profile_kwai_id": matched_creator.get("kwai_id", ""),
         })
-    submissions = read_json_file(SUBMISSIONS_FILE, [])
-    if not isinstance(submissions, list):
-        submissions = []
     submissions.insert(0, submission)
     write_json_atomic(SUBMISSIONS_FILE, submissions[:1000])
     return submission
@@ -2787,7 +2813,7 @@ function renderScriptSlot(html,e){{return html?cleanScriptHtml(html,e):`<article
 function renderDetail(e){{const s=statusOf(e.entry_id);const liked=ids("saved").has(e.entry_id);document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><div class="detail-content">${{detailCover(e)}}<h2 class="detail-title">${{esc(ptTitle(e))}}</h2><div class="tags"><span class="tag">${{esc(ptTag(e.content_type))}}</span>${{durationLabel(e)?`<span class="tag">${{esc(durationLabel(e))}}</span>`:""}}${{s?`<span class="tag">${{esc(ptTag(s))}}</span>`:""}}</div><div class="share-box" id="share-output"></div><div id="script-html-slot">${{e.script_html?renderScriptSlot(e.script_html,e):scriptLoading()}}</div>${{videoPreview(e)}}<section class="submit"><b>${{t("submitTitle")}}</b><p class="lead">${{t("submitHint")}}</p><input type="url" data-submit-url="${{esc(e.entry_id)}}" placeholder="${{t("submitPlaceholder")}}"><button class="primary" data-submit="${{esc(e.entry_id)}}">${{t("submitButton")}}</button><div id="submit-status-${{esc(e.entry_id)}}"></div></section><div class="social-actions"><button class="social-btn" type="button" data-status="${{liked?"":"saved"}}" data-entry="${{esc(e.entry_id)}}" aria-label="${{t("save")}}">♡<span>${{liked?(lang==="zh"?"已收藏":"Salvo"):(lang==="zh"?"收藏":"Salvar")}}</span></button><button class="social-btn" type="button" data-copy-share="${{esc(e.entry_id)}}" aria-label="${{lang==="zh"?"复制分享链接":"Copiar link"}}">↗<span>${{lang==="zh"?"分享":"Compartilhar"}}</span></button></div></div>`}}
 function loadDetailHtml(e){{if(e.script_html)return;setTimeout(async()=>{{try{{const html=await fetchScriptHtml(e.entry_id);const slot=document.querySelector("#script-html-slot");if(slot)slot.innerHTML=renderScriptSlot(html,e)}}catch(err){{const slot=document.querySelector("#script-html-slot");if(slot)slot.innerHTML=renderScriptSlot("",{{...e,summary:e.summary||err.message}})}}}},300)}}
 async function openDetail(id){{analyticsCurrentScriptId=id||"";const modal=document.querySelector("#modal");modal.classList.add("active");const local=entry(id);if(local){{renderDetail(local);hydrateVideo(local);loadDetailHtml(local);return}}document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><section class="state card"><h3>${{lang==="zh"?"正在加载脚本..." :"Carregando roteiro..."}}</h3></section>`;try{{const e=await fetchScript(id);renderDetail(e);hydrateVideo(e);loadDetailHtml(e)}}catch(err){{document.querySelector("#detail").innerHTML=`<div class="detail-top"><button class="icon" data-close>×</button></div><section class="state card"><h3>${{lang==="zh"?"脚本加载失败":"Falha ao carregar"}}</h3><p>${{esc(err.message)}}</p></section>`}}}}
-async function submitVideo(id){{const input=document.querySelector(`[data-submit-url="${{id}}"]`);const status=document.querySelector(`#submit-status-${{id}}`);const video_url=String(input?.value||"").trim();if(!creatorUser){{if(status)status.textContent=lang==="zh"?"请先用手机号登录。":"Entre com seu telefone primeiro.";openAuth("login");return}}if(!video_url){{status.textContent=t("submitError");return}}status.textContent=lang==="zh"?"提交中...":"Enviando...";try{{const r=await fetch("/api/creator/submissions",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{entry_id:id,video_url,creator_id:creatorUser?.account_id||creatorUser?.phone||"creator"}})}});if(!r.ok)throw new Error();status.textContent=t("submitOk");await loadSubmissions();setStatus(id,"finished");savedTab="finished"}}catch(e){{status.textContent=t("submitError")}}}}
+async function submitVideo(id){{const input=document.querySelector(`[data-submit-url="${{id}}"]`);const status=document.querySelector(`#submit-status-${{id}}`);const video_url=String(input?.value||"").trim();const duplicateText="作品已上传，无需重复上传";if(!creatorUser){{if(status)status.textContent=lang==="zh"?"请先用手机号登录。":"Entre com seu telefone primeiro.";openAuth("login");return}}if(!video_url){{status.textContent=t("submitError");return}}status.textContent=lang==="zh"?"提交中...":"Enviando...";try{{const r=await fetch("/api/creator/submissions",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{entry_id:id,video_url,creator_id:creatorUser?.account_id||creatorUser?.phone||"creator"}})}});const d=await r.json().catch(()=>({{}}));if(r.status===409||d.code==="duplicate_submission"){{if(status)status.textContent=duplicateText;alert(duplicateText);return}}if(!r.ok)throw new Error(d.error||"submit failed");status.textContent=t("submitOk");await loadSubmissions();setStatus(id,"finished");savedTab="finished"}}catch(e){{status.textContent=t("submitError")}}}}
 function closeDetail(){{trackDuration(true);analyticsCurrentScriptId="";document.querySelectorAll("#modal video").forEach(v=>{{try{{v.pause();v.removeAttribute("src");v.load()}}catch(e){{}}}});document.querySelector("#modal").classList.remove("active");document.querySelector("#detail").innerHTML=""}}
 function handleProfileImage(kind,file){{if(!file||!file.type.startsWith("image/"))return;const reader=new FileReader();reader.onload=()=>{{profileUi[kind]=String(reader.result||"");saveProfileUi();updateProfileImages()}};reader.readAsDataURL(file)}}
 document.addEventListener("click",async e=>{{if(e.target.closest("[data-logout]")){{logout();return}}if(e.target.closest("[data-feature-next]")){{track("feature_next");featuredOffset++;renderDashboard();return}}const upload=e.target.closest("[data-upload-trigger]");if(upload){{document.querySelector(`#profile-${{upload.dataset.uploadTrigger}}-input`)?.click();return}}const jump=e.target.closest("[data-tab-jump]");if(jump){{savedTab=jump.dataset.tabJump;show("saved");return}}const authOpen=e.target.closest("[data-auth-open]");if(authOpen){{openAuth(authOpen.dataset.authOpen||"login");return}}if(e.target.closest("[data-auth-close]")){{closeAuth();return}}const authToggle=e.target.closest("[data-auth-toggle]");if(authToggle){{setAuthMode(authMode==="register"?"login":"register");return}}const reselect=e.target.closest("[data-reselect]");if(reselect){{show("choose");return}}const stepNav=e.target.closest("[data-step]");if(stepNav){{step=Number(stepNav.dataset.step)||0;renderQuestion();return}}if(e.target.closest("#prev-step")){{goStep(-1);return}}const tab=e.target.closest("[data-tab]");if(tab){{savedTab=tab.dataset.tab;renderSaved();return}}const shootMonth=e.target.closest("[data-shoot-month]");if(shootMonth){{shiftScheduleMonth(Number(shootMonth.dataset.shootMonth)||0);return}}const shootDate=e.target.closest("[data-shoot-date]");if(shootDate){{scheduleViewDate=shootDate.dataset.shootDate;renderScheduleFeed();return}}const d=e.target.closest("[data-detail]");if(d){{track("detail_open",{{script_id:d.dataset.detail||""}});openDetail(d.dataset.detail);return}}if(e.target.closest("[data-close]")||e.target.id==="modal"){{closeDetail();return}}const copy=e.target.closest("[data-copy-share]");if(copy){{const id=copy.dataset.copyShare;track("share_click",{{script_id:id}});const ok=await copyText(shareUrl(id));showShareLink(id,ok);const label=copy.querySelector("span");if(label)label.textContent=ok?(lang==="zh"?"已复制":"Copiado"):(lang==="zh"?"复制失败，请手动复制":"Copie manualmente");return}}const scrollSubmit=e.target.closest("[data-submit-scroll]");if(scrollSubmit){{track("submit_click",{{script_id:scrollSubmit.dataset.submitScroll||""}});document.querySelector(`[data-submit-url="${{scrollSubmit.dataset.submitScroll}}"]`)?.scrollIntoView({{behavior:"smooth",block:"center"}});return}}const sub=e.target.closest("[data-submit]");if(sub){{track("submit_click",{{script_id:sub.dataset.submit||""}});submitVideo(sub.dataset.submit);return}}const st=e.target.closest("[data-status]");if(st){{if(st.dataset.status==="saved")track("save_click",{{script_id:st.dataset.entry||""}});const inDetail=!!st.closest("#detail");setStatus(st.dataset.entry,st.dataset.status);if(inDetail){{const fresh=entry(st.dataset.entry);if(fresh)renderDetail(fresh)}}else{{const label=st.querySelector("span");if(label)label.textContent=t(st.dataset.status==="saved"?"saved":st.dataset.status==="planned"?"plan":"save")}}return}}const go=e.target.closest("[data-go]");if(go){{if(go.dataset.go==="all-scripts")track("all_scripts_open");if(go.dataset.go==="saved")track("profile_open");if(go.dataset.savedTab)savedTab=go.dataset.savedTab;show(go.dataset.go);return}}const ans=e.target.closest("[data-answer]");if(ans){{const q=questions.find(item=>item.id===ans.dataset.answer);if(isMultipleQuestion(q)){{const values=answerValues(q.id);answers[q.id]=values.includes(ans.dataset.value)?values.filter(v=>v!==ans.dataset.value):[...values,ans.dataset.value];normalizeAnswers();saveProfile();renderQuestion();}}else{{answers[ans.dataset.answer]=ans.dataset.value;normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard");}}return}}if(e.target.closest("#next-step")){{normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard")}}}});
@@ -3315,6 +3341,8 @@ class Handler(BaseHTTPRequestHandler):
                     account=account,
                 )
                 self.send_json({"ok": True, "submission": submission}, status=201)
+            except DuplicateSubmissionError as exc:
+                self.send_json({"error": str(exc), "code": "duplicate_submission"}, status=409)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
             return
