@@ -1340,6 +1340,29 @@ def account_aliases(account: dict[str, Any]) -> set[str]:
     return aliases
 
 
+def account_alias_lookup(accounts: list[dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
+    lookup: dict[str, dict[str, Any]] = {}
+    for account in accounts if accounts is not None else load_accounts():
+        if not isinstance(account, dict):
+            continue
+        for alias in account_aliases(account):
+            if alias:
+                lookup.setdefault(alias, account)
+    return lookup
+
+
+def find_account_from_lookup(account_id: str, lookup: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    targets = {
+        canonical_account_key(account_id),
+        canonical_account_key(normalize_phone(account_id)),
+        normalize_kwai_id(account_id),
+    }
+    for target in targets:
+        if target and target in lookup:
+            return lookup[target]
+    return None
+
+
 def merge_account_dict(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     for key in ["display_name", "kwai_id", "uid", "status", "source", "registration_status", "created_at", "provisioned_at", "registered_at", "last_registered_at", "updated_at", "last_login_at", "first_seen_at"]:
@@ -2299,6 +2322,7 @@ def public_creator_profile(
     entries: list[dict[str, Any]] | None = None,
     submissions: list[dict[str, Any]] | None = None,
     script_preview_limit: int | None = None,
+    account_lookup: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     categories = [str(item or "").strip() for item in profile.get("categories") or [] if str(item or "").strip()]
     script_limit = 80 if script_preview_limit is None else max(0, script_preview_limit)
@@ -2307,7 +2331,8 @@ def public_creator_profile(
     submissions = submissions if submissions is not None else read_json_file(SUBMISSIONS_FILE, [])
     if not isinstance(submissions, list):
         submissions = []
-    account = find_account(str(profile.get("account_id") or profile.get("phone") or profile.get("kwai_id") or profile.get("uid") or ""))
+    account_key = str(profile.get("account_id") or profile.get("phone") or profile.get("kwai_id") or profile.get("uid") or "")
+    account = find_account_from_lookup(account_key, account_lookup) if account_lookup is not None else find_account(account_key)
     account_public: dict[str, Any] = {}
     if account:
         state = account.get("state") if isinstance(account.get("state"), dict) else {}
@@ -2390,8 +2415,9 @@ def public_creator_profiles() -> list[dict[str, Any]]:
     submissions = read_json_file(SUBMISSIONS_FILE, [])
     if not isinstance(submissions, list):
         submissions = []
+    account_lookup = account_alias_lookup()
     profiles = [
-        public_creator_profile(item, include_scripts=False, submissions=submissions, script_preview_limit=0)
+        public_creator_profile(item, include_scripts=False, submissions=submissions, script_preview_limit=0, account_lookup=account_lookup)
         for item in load_creator_profiles()
     ]
     profiles.sort(key=lambda item: (int(item.get("submission_count") or 0), int(item.get("returned_script_count") or 0), str(item.get("updated_at") or "")), reverse=True)
@@ -3040,12 +3066,31 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/admin/submissions":
             if not self.require_admin():
                 return
+            q = urllib.parse.parse_qs(parsed.query)
+            try:
+                limit = max(1, min(300, int((q.get("limit") or ["80"])[0] or "80")))
+            except Exception:
+                limit = 80
+            try:
+                offset = max(0, int((q.get("offset") or ["0"])[0] or "0"))
+            except Exception:
+                offset = 0
             submissions = read_json_file(SUBMISSIONS_FILE, [])
             if not isinstance(submissions, list):
                 submissions = []
-            enriched = enrich_submission_records(submissions)
+            total = len(submissions)
+            page = submissions[offset:offset + limit]
+            enriched = enrich_submission_records(page)
             unmatched_count = sum(1 for item in enriched if item.get("creator_unmatched"))
-            self.send_json({"ok": True, "submissions": enriched, "total": len(enriched), "unmatched_count": unmatched_count})
+            self.send_json({
+                "ok": True,
+                "submissions": enriched,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "has_more": offset + limit < total,
+                "unmatched_count": unmatched_count,
+            })
             return
         if parsed.path == "/api/admin/analytics":
             if not self.require_admin():
