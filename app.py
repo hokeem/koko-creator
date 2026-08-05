@@ -1427,14 +1427,20 @@ def submission_kwai_id(submission: dict[str, Any]) -> str:
     return normalize_kwai_id(submission.get("detected_kwai_id") or kwai_handle_from_url(str(submission.get("video_url") or "")))
 
 
-def match_submission_creator(submission: dict[str, Any], profiles: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+def match_submission_creator(
+    submission: dict[str, Any],
+    profiles: list[dict[str, Any]] | None = None,
+    account_lookup: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
     profiles = profiles if profiles is not None else load_creator_profiles()
+    account_lookup = account_lookup if account_lookup is not None else account_alias_lookup()
     submission_creator = normalize_account_key(submission.get("creator_id") or "")
     submission_kwai = submission_kwai_id(submission)
     for profile in profiles:
         if not isinstance(profile, dict):
             continue
-        account = find_account(str(profile.get("account_id") or profile.get("phone") or profile.get("kwai_id") or profile.get("uid") or ""))
+        account_key = str(profile.get("account_id") or profile.get("phone") or profile.get("kwai_id") or profile.get("uid") or "")
+        account = find_account_from_lookup(account_key, account_lookup)
         creator_keys = {
             normalize_account_key(profile.get("profile_id") or ""),
             normalize_account_key(profile.get("account_id") or ""),
@@ -1456,12 +1462,13 @@ def match_submission_creator(submission: dict[str, Any], profiles: list[dict[str
 
 def enrich_submission_records(submissions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     profiles = load_creator_profiles()
+    account_lookup = account_alias_lookup()
     enriched: list[dict[str, Any]] = []
     for item in submissions:
         if not isinstance(item, dict):
             continue
         row = dict(item)
-        matched = match_submission_creator(row, profiles)
+        matched = match_submission_creator(row, profiles, account_lookup)
         if matched:
             row["creator_profile_id"] = matched.get("profile_id", "")
             row["creator_profile_name"] = matched.get("name", "")
