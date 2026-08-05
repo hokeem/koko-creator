@@ -773,6 +773,11 @@ def score_entry(entry: dict[str, Any], selected: list[str], index: int) -> int:
     return score
 
 
+def entry_time_sort_key(entry: dict[str, Any]) -> str:
+    item = normalized_entry(entry)
+    return str(item.get("saved_at") or item.get("created_at") or "")
+
+
 def abs_url(url: object, base_url: str = "https://koko-kwai-coach.onrender.com") -> str:
     text = str(url or "").strip()
     if not text:
@@ -896,10 +901,12 @@ def recommendation_payload(selected: list[str], limit: int = 80) -> dict[str, An
             "entries": [public_entry(entry, score_entry(entry, selected, idx)) for idx, entry in enumerate(entries[:limit])],
         }
     candidates = filtered_entries_for_selection(entries, selected)
-    scored = sorted(((score_entry(entry, selected, idx), entry) for idx, entry in enumerate(candidates)), key=lambda pair: pair[0], reverse=True)
-    if len(selected_durations(selected)) > 1:
-        salt = "|".join(sorted(selected))
-        scored = sorted(scored, key=lambda pair: hashlib.sha1(f"{salt}:{pair[1].get('entry_id') or pair[1].get('video_url') or pair[0]}".encode("utf-8")).hexdigest())
+    scored = [
+        (score_entry(entry, selected, idx), entry)
+        for idx, entry in enumerate(
+            sorted(candidates, key=entry_time_sort_key, reverse=True)
+        )
+    ]
     return {"questions": QUESTIONS, "selected": selected, "total": len(scored), "entries": [public_entry(entry, score) for score, entry in scored[:limit]]}
 
 
@@ -2664,7 +2671,7 @@ function renderQuestion(){{normalizeAnswers();if(!stepAvailable(step)){{const fi
 function entryTimestamp(e){{const raw=e.script_date||e.created_at||e.saved_at||"";const n=Date.parse(raw);return Number.isNaN(n)?0:n}}
 let entriesLoadedLimit=0;let entriesLoadedKey="";
 function recommendationKey(){{return selectedAnswerValues().join("|")}}
-async function loadEntries(limit=48,opts={{}}){{const key=recommendationKey();const force=!!opts.force;if(!force&&entries.length&&entriesLoadedKey===key&&entriesLoadedLimit>=limit){{counts();return entries}}const cacheKey=`koko_reco_cache_v2_${{key}}_${{limit}}`;if(!force){{try{{const cached=JSON.parse(sessionStorage.getItem(cacheKey)||"null");if(cached&&Date.now()-cached.ts<10*60*1000&&Array.isArray(cached.entries)){{entries=cached.entries;entriesLoadedKey=key;entriesLoadedLimit=limit;counts();return entries}}}}catch(err){{}}}}const p=new URLSearchParams({{limit:String(limit)}});selectedAnswerValues().forEach(v=>p.append("selected",v));const r=await fetch(`/api/creator/recommendations?${{p.toString()}}&_=${{Date.now()}}`);const d=await r.json();if(!r.ok)throw new Error(d.error||"load failed");entries=(d.entries||[]).slice();if(!hasMultiDurationSelection())entries.sort((a,b)=>entryTimestamp(b)-entryTimestamp(a));entriesLoadedKey=key;entriesLoadedLimit=limit;try{{sessionStorage.setItem(cacheKey,JSON.stringify({{ts:Date.now(),entries}}))}}catch(err){{}}counts();return entries}}
+async function loadEntries(limit=48,opts={{}}){{const key=recommendationKey();const force=!!opts.force;if(!force&&entries.length&&entriesLoadedKey===key&&entriesLoadedLimit>=limit){{counts();return entries}}const cacheKey=`koko_reco_cache_v3_time_${{key}}_${{limit}}`;if(!force){{try{{const cached=JSON.parse(sessionStorage.getItem(cacheKey)||"null");if(cached&&Date.now()-cached.ts<10*60*1000&&Array.isArray(cached.entries)){{entries=cached.entries;entriesLoadedKey=key;entriesLoadedLimit=limit;counts();return entries}}}}catch(err){{}}}}const p=new URLSearchParams({{limit:String(limit)}});selectedAnswerValues().forEach(v=>p.append("selected",v));const r=await fetch(`/api/creator/recommendations?${{p.toString()}}&_=${{Date.now()}}`);const d=await r.json();if(!r.ok)throw new Error(d.error||"load failed");entries=(d.entries||[]).slice();entries.sort((a,b)=>entryTimestamp(b)-entryTimestamp(a));entriesLoadedKey=key;entriesLoadedLimit=limit;try{{sessionStorage.setItem(cacheKey,JSON.stringify({{ts:Date.now(),entries}}))}}catch(err){{}}counts();return entries}}
 function chips(){{const lookup=Object.fromEntries(questions.flatMap(q=>q.options.map(o=>[o.id,o])));return selectedAnswerValues().map(id=>lookup[id]).filter(Boolean).map(o=>`<span class="chip">${{esc(label(o))}} ✓</span>`).join("")}}
 function dayKey(d){{const y=d.getFullYear();const m=String(d.getMonth()+1).padStart(2,"0");const day=String(d.getDate()).padStart(2,"0");return `${{y}}-${{m}}-${{day}}`}}
 function todayKey(){{return dayKey(new Date())}}
