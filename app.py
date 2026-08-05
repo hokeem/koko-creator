@@ -19,9 +19,15 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 
 
 PORT = int(os.environ.get("PORT", "10000"))
@@ -40,6 +46,7 @@ ANALYTICS_FILE = DATA_ROOT / "creator_analytics_events.json"
 THUMB_CACHE_FILE = DATA_ROOT / "creator_thumbnail_cache.json"
 VIDEO_SOURCE_CACHE_FILE = DATA_ROOT / "creator_video_source_cache.json"
 SCRIPT_HTML_CACHE_DIR = DATA_ROOT / "creator_script_html_cache"
+THUMB_IMAGE_CACHE_DIR = DATA_ROOT / "creator_thumbnail_images"
 MANUAL_SCRIPT_ASSET_DIR = DATA_ROOT / "manual_scripts"
 SYNC_META_FILE = DATA_ROOT / "creator_sync_meta.json"
 OVERRIDES_FILE = DATA_ROOT / "creator_script_overrides.json"
@@ -977,6 +984,42 @@ def thumbnail_url(entry: dict[str, Any]) -> str:
     cache[entry_id] = {"thumbnail_url": thumb, "checked_at": now_iso()}
     write_json_atomic(THUMB_CACHE_FILE, cache)
     return thumb
+
+
+def fetch_image_bytes(url: str, timeout: int = 15) -> tuple[bytes, str]:
+    local = local_static_file_from_url(url)
+    if local:
+        return local.read_bytes(), mimetypes.guess_type(str(local))[0] or "image/jpeg"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return response.read(), response.headers.get("Content-Type") or "image/jpeg"
+
+
+def optimized_thumbnail(entry: dict[str, Any]) -> tuple[bytes, str]:
+    entry_id = str(entry.get("entry_id") or "").strip()
+    source_url = thumbnail_url(entry)
+    if not entry_id or not source_url:
+        return placeholder_svg(entry), "image/svg+xml; charset=utf-8"
+    digest = hashlib.sha1(source_url.encode("utf-8")).hexdigest()[:12]
+    cache_file = THUMB_IMAGE_CACHE_DIR / f"{entry_id}-{digest}.webp"
+    if cache_file.exists():
+        return cache_file.read_bytes(), "image/webp"
+    raw, content_type = fetch_image_bytes(source_url)
+    if Image is None:
+        return raw, content_type
+    try:
+        image = Image.open(BytesIO(raw))
+        image.thumbnail((720, 720), Image.Resampling.LANCZOS)
+        if image.mode not in {"RGB", "RGBA"}:
+            image = image.convert("RGB")
+        THUMB_IMAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        out = BytesIO()
+        image.save(out, format="WEBP", quality=76, method=5)
+        data = out.getvalue()
+        cache_file.write_bytes(data)
+        return data, "image/webp"
+    except Exception:
+        return raw, content_type
 
 
 def placeholder_svg(entry: dict[str, Any] | None) -> bytes:
@@ -2681,7 +2724,8 @@ function saveScheduleItem(id,date){{workspace.schedule=workspace.schedule||{{}};
 function openScheduleModal(id){{scheduleDraftId=id;scheduleSelectedDate=todayKey();renderCalendar();document.querySelector("#schedule-title").textContent=lang==="zh"?"加入拍摄日历":"Adicionar ao calendário de gravação";document.querySelector("#schedule-note").textContent=lang==="zh"?"选择你准备拍摄这个脚本的日期。":"Escolha o dia em que pretende gravar este roteiro.";document.querySelector(".schedule-actions [data-schedule-close]").textContent=lang==="zh"?"稍后再说":"Mais tarde";document.querySelector("[data-schedule-confirm]").textContent=lang==="zh"?"加入拍摄日历":"Adicionar";document.querySelector("#schedule-modal").classList.add("active")}}
 function closeScheduleModal(){{document.querySelector("#schedule-modal").classList.remove("active");scheduleDraftId=""}}
 function renderCalendar(){{const root=document.querySelector("#calendar-grid");if(!root)return;const base=scheduleSelectedDate?new Date(`${{scheduleSelectedDate}}T00:00:00`):new Date();const first=new Date(base.getFullYear(),base.getMonth(),1);const start=new Date(first);start.setDate(first.getDate()-first.getDay());const weekdays=lang==="zh"?["日","一","二","三","四","五","六"]:["D","S","T","Q","Q","S","S"];let html=weekdays.map(w=>`<div class="calendar-weekday">${{w}}</div>`).join("");for(let i=0;i<35;i++){{const d=new Date(start);d.setDate(start.getDate()+i);const key=dayKey(d);const muted=d.getMonth()!==base.getMonth();const selected=key===scheduleSelectedDate;html+=`<button class="calendar-day ${{muted?"muted":""}} ${{selected?"selected":""}}" type="button" data-schedule-date="${{key}}">${{d.getDate()}}</button>`}}root.innerHTML=html}}
-function scriptImage(e){{return String(e.preview_image_url||e.cover_url||e.thumbnail_url||storyboardDemoUrl||"").trim()}}
+function thumbImage(e){{return e?.entry_id?`/api/creator/thumbnail/${{e.entry_id}}.webp`:""}}
+function scriptImage(e){{return String(thumbImage(e)||e.thumbnail_url||e.preview_image_url||e.cover_url||storyboardDemoUrl||"").trim()}}
 function scheduleItem(e,date){{return `<button class="schedule-item" type="button" data-detail="${{esc(e.entry_id)}}"><img src="${{esc(scriptImage(e))}}" loading="lazy" alt=""><div><h3>${{esc(ptTitle(e))}}</h3><p>${{esc(ptTag(e.content_type||""))}} · ${{esc(scheduleLabel(date))}}</p></div></button>`}}
 function monthTitle(date){{return lang==="zh"?`${{date.getFullYear()}}年${{date.getMonth()+1}}月`:date.toLocaleDateString("pt-BR",{{month:"long",year:"numeric"}})}}
 function shiftScheduleMonth(delta){{const base=new Date(`${{scheduleViewDate||todayKey()}}T00:00:00`);base.setMonth(base.getMonth()+delta);scheduleViewDate=dayKey(base);renderScheduleFeed()}}
@@ -2694,8 +2738,9 @@ function card(e,i){{const s=statusOf(e.entry_id);return `<article class="script 
 function renderList(sel,list){{document.querySelector(sel).innerHTML=list.length?list.map(card).join(""):`<section class="state card"><h3>${{t("empty")}}</h3><p class="lead">${{t("emptyText")}}</p><button class="primary" data-go="dashboard">${{t("navHome")}}</button></section>`}}
 function masonryHtml(list){{if(!list.length)return `<section class="state card"><h3>${{t("empty")}}</h3><p class="lead">${{t("emptyText")}}</p><button class="primary" data-go="dashboard">${{t("navHome")}}</button></section>`;const groups=new Map();list.forEach(e=>{{const key=dateKey(e);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(e)}});const keys=[...groups.keys()].sort((a,b)=>b.localeCompare(a));return keys.map(key=>`<section class="date-group"><div class="date-divider">${{esc(dateLabel(key))}}</div><div class="masonry">${{groups.get(key).map(masonryCard).join("")}}</div></section>`).join("")}}
 function renderMasonry(sel,list){{document.querySelector(sel).innerHTML=masonryHtml(list)}}
+function preloadImagesAround(index){{if(!entries.length)return;[0,1,2,3].forEach(offset=>{{const item=entries[(index+offset)%entries.length];const url=scriptImage(item);if(url){{const img=new Image();img.decoding="async";img.loading="eager";img.src=url;}}}})}}
 function featuredCard(e,i){{const s=statusOf(e.entry_id);const liked=ids("saved").has(e.entry_id);const tags=[ptTag(e.content_type),durationLabel(e),...(s?[ptTag(s)]:[])].filter(Boolean);const summary=preferPortugueseText(e.summary)||ptTag(e.content_type)||"";return `<section class="featured-shell"><article class="featured-card"><div class="featured-media"><img src="${{esc(scriptImage(e))}}" loading="eager" alt=""><span class="featured-badge">Recomendado agora</span><span class="featured-score">${{i+1}}/${{entries.length}}</span></div><div class="featured-body"><h2 class="featured-title">${{esc(ptTitle(e))}}</h2><p class="featured-summary">${{esc(summary)}}</p><div class="featured-tags">${{tags.map(x=>`<span class="tag">${{esc(x)}}</span>`).join("")}}</div><div class="featured-actions"><button class="featured-icon" type="button" data-status="${{liked?"":"saved"}}" data-entry="${{esc(e.entry_id)}}" aria-label="${{t("save")}}"><span class="btn-ico">${{liked?"✓":"♡"}}</span><span>${{liked?(lang==="zh"?"已收藏":"Salvo"):(lang==="zh"?"收藏":"Salvar")}}</span></button><button class="primary" type="button" data-detail="${{esc(e.entry_id)}}"><span class="btn-ico">⌕</span><span>${{lang==="zh"?"具体查看":"Ver detalhes"}}</span></button></div><button class="featured-next" type="button" data-feature-next><span class="btn-ico">→</span><span>${{lang==="zh"?"查看下一个脚本":"Ver proximo roteiro"}}</span></button></div></article><button class="view-all-card" type="button" data-go="all-scripts"><b>${{lang==="zh"?"查看全部推荐脚本":"Ver todos os roteiros recomendados"}}</b><span>${{lang==="zh"?"打开双列瀑布流，集中浏览全部脚本。":"Abrir a lista em duas colunas para explorar tudo."}}</span></button></section>`}}
-async function ensure(limit=48){{if(!entries.length||entriesLoadedKey!==recommendationKey()||entriesLoadedLimit<limit)await loadEntries(limit)}} async function renderDashboard(){{document.querySelector("#dashboard-feed").innerHTML=`<section class="state card"><h3>Loading...</h3></section>`;try{{await ensure(48);if(!entries.length){{renderMasonry("#dashboard-feed",entries);return}}const featuredIndex=((featuredOffset%entries.length)+entries.length)%entries.length;document.querySelector("#dashboard-feed").innerHTML=featuredCard(entries[featuredIndex],featuredIndex)}}catch(e){{document.querySelector("#dashboard-feed").innerHTML=`<section class="state card"><h3>Erro</h3></section>`}}}}
+async function ensure(limit=48){{if(!entries.length||entriesLoadedKey!==recommendationKey()||entriesLoadedLimit<limit)await loadEntries(limit)}} async function renderDashboard(){{document.querySelector("#dashboard-feed").innerHTML=`<section class="state card"><h3>Loading...</h3></section>`;try{{await ensure(48);if(!entries.length){{renderMasonry("#dashboard-feed",entries);return}}const featuredIndex=((featuredOffset%entries.length)+entries.length)%entries.length;preloadImagesAround(featuredIndex);document.querySelector("#dashboard-feed").innerHTML=featuredCard(entries[featuredIndex],featuredIndex)}}catch(e){{document.querySelector("#dashboard-feed").innerHTML=`<section class="state card"><h3>Erro</h3></section>`}}}}
 async function renderAllScripts(){{document.querySelector("#all-title").textContent=lang==="zh"?"全部推荐脚本":"Todos os roteiros";document.querySelector("#all-feed").innerHTML=`<section class="state card"><h3>Loading...</h3></section>`;try{{await ensure(500);renderMasonry("#all-feed",entries)}}catch(e){{document.querySelector("#all-feed").innerHTML=`<section class="state card"><h3>Erro</h3></section>`}}}}
 async function loadSubmissions(){{try{{const r=await fetch(`/api/creator/submissions?_=${{Date.now()}}`);const d=await r.json();submissions=Array.isArray(d.submissions)?d.submissions:[]}}catch(e){{submissions=[]}}return submissions}}
 function submissionTime(s){{const raw=String(s.created_at||"");const d=new Date(raw);if(Number.isNaN(d.getTime()))return raw;return lang==="zh"?`回传时间：${{d.toLocaleString("zh-CN",{{hour12:false}})}}`:`Enviado em ${{d.toLocaleString("pt-BR",{{hour12:false}})}}`}}
@@ -2708,7 +2753,7 @@ async function fetchScriptHtml(id){{const r=await fetch(`/api/creator/script-htm
 function shareUrl(id){{return `${{location.origin}}/script/${{id}}`}}
 async function copyText(text){{try{{if(navigator.clipboard){{await navigator.clipboard.writeText(text);return true}}}}catch(err){{}}try{{const ta=document.createElement("textarea");ta.value=text;ta.setAttribute("readonly","");ta.style.position="fixed";ta.style.top="0";ta.style.left="-9999px";document.body.appendChild(ta);ta.focus();ta.select();ta.setSelectionRange(0,ta.value.length);const ok=document.execCommand("copy");ta.remove();return ok}}catch(err){{return false}}}}
 function showShareLink(id,copied){{const url=shareUrl(id);const box=document.querySelector("#share-output");if(box){{box.classList.add("active");box.innerHTML=`<b>${{copied?(lang==="zh"?"已复制分享链接":"Link copiado"):(lang==="zh"?"分享链接":"Link de compartilhamento")}}</b><a href="${{esc(url)}}" target="_blank" rel="noopener">${{esc(url)}}</a>`;if(!copied){{const link=box.querySelector("a");const range=document.createRange();range.selectNodeContents(link);const sel=window.getSelection();sel.removeAllRanges();sel.addRange(range)}}}}}}
-function coverImage(e){{return scriptImage(e)}}
+function coverImage(e){{return String(e.preview_image_url||e.cover_url||e.storyboard_image_url||scriptImage(e)||"").trim()}}
 function storyboardImage(e){{return String(e.storyboard_image_url||e.storyboard_url||scriptImage(e)||"").trim()}}
 function detailCover(e){{return `<div class="detail-cover"><img src="${{esc(coverImage(e))}}" loading="eager" alt="Cover"></div>`}}
 function videoPreview(e){{const url=esc(e.video_url);const img=esc(e.thumbnail_url);return `<section class="video-section"><h3 class="video-section-title">${{lang==="zh"?"看看其他人做的：":"Veja como outros criadores fizeram:"}}<span>${{lang==="zh"?"参考视频":"Referencia"}}</span></h3><div class="video-box" data-video-box="${{esc(e.entry_id)}}" data-video-src="${{url}}"><img src="${{img}}" alt="video preview"><div class="video-fallback">${{url ? (lang==="zh"?"视频预览加载中":"Carregando preview") : ""}}</div></div></section>`}}
@@ -3035,26 +3080,11 @@ class Handler(BaseHTTPRequestHandler):
             if not entry:
                 self.send_error(404)
                 return
-            url = thumbnail_url(entry)
-            if url:
-                try:
-                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req, timeout=15) as response:
-                        raw = response.read()
-                        content_type = response.headers.get("Content-Type") or "image/webp"
-                    self.send_response(200)
-                    self.send_header("Content-Type", content_type)
-                    self.send_header("Content-Length", str(len(raw)))
-                    self.send_header("Cache-Control", "public, max-age=86400")
-                    self.end_headers()
-                    self.wfile.write(raw)
-                    return
-                except Exception:
-                    pass
-            raw = placeholder_svg(entry)
+            raw, content_type = optimized_thumbnail(entry)
             self.send_response(200)
-            self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "public, max-age=604800, immutable")
             self.end_headers()
             self.wfile.write(raw)
             return
