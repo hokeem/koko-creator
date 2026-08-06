@@ -2166,6 +2166,25 @@ def update_account_profile(account_id: str, payload: dict[str, Any]) -> dict[str
     )
 
 
+def delete_account(account_id: str) -> bool:
+    aliases = account_aliases({"account_id": account_id, "phone": account_id})
+    aliases.add(canonical_account_key(account_id))
+    aliases.add(canonical_account_key(normalize_phone(account_id)))
+    aliases.add(normalize_kwai_id(account_id))
+    aliases = {item for item in aliases if item}
+    if not aliases:
+        return False
+    accounts = load_accounts()
+    next_accounts = [
+        account for account in accounts
+        if not (account_aliases(account) & aliases)
+    ]
+    if len(next_accounts) == len(accounts):
+        return False
+    save_accounts(next_accounts)
+    return True
+
+
 def public_admin_entry(entry: dict[str, Any]) -> dict[str, Any]:
     entry = normalized_entry(entry)
     entry_id = str(entry.get("entry_id") or "").strip()
@@ -3451,6 +3470,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        account_match = re.fullmatch(r"/api/admin/accounts/([^/]+)", parsed.path)
+        if account_match:
+            if not self.require_admin():
+                return
+            account_id = urllib.parse.unquote(account_match.group(1))
+            if not delete_account(account_id):
+                self.send_json({"error": "Account not found."}, status=404)
+                return
+            self.send_json({"ok": True, "account_id": account_id})
+            return
         creator_match = re.fullmatch(r"/api/admin/creators/([0-9a-f]{32})", parsed.path)
         if creator_match:
             if not self.require_admin():
