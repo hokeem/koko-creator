@@ -969,6 +969,44 @@ def meta_video_source(html_text: str) -> str:
     return html.unescape(match.group(1).replace("\\u002F", "/").strip())
 
 
+def official_video_embed_url(source_url: str) -> tuple[str, str]:
+    """Return a platform-owned embed URL for supported public post URLs."""
+    try:
+        parsed = urllib.parse.urlparse(source_url)
+    except ValueError:
+        return "", ""
+    host = (parsed.hostname or "").lower()
+    path_parts = [part for part in parsed.path.split("/") if part]
+
+    if host == "tiktok.com" or host.endswith(".tiktok.com"):
+        match = re.search(r"/video/(\d+)", parsed.path)
+        if not match:
+            return "tiktok", ""
+        query = urllib.parse.urlencode({
+            "autoplay": "0",
+            "controls": "1",
+            "loop": "0",
+            "music_info": "0",
+            "description": "0",
+            "rel": "0",
+            "native_context_menu": "0",
+        })
+        return "tiktok", f"https://www.tiktok.com/player/v1/{match.group(1)}?{query}"
+
+    if host == "instagram.com" or host.endswith(".instagram.com"):
+        if len(path_parts) < 2 or path_parts[0].lower() not in {"p", "reel", "reels", "tv"}:
+            return "instagram", ""
+        content_type = "reel" if path_parts[0].lower() in {"reel", "reels"} else path_parts[0].lower()
+        shortcode = re.sub(r"[^A-Za-z0-9_-]", "", path_parts[1])
+        if not shortcode:
+            return "instagram", ""
+        return "instagram", f"https://www.instagram.com/{content_type}/{shortcode}/embed/"
+
+    if host == "kwai.com" or host.endswith(".kwai.com"):
+        return "kwai", ""
+    return "other", ""
+
+
 def video_source_url(entry: dict[str, Any]) -> str:
     entry_id = str(entry.get("entry_id") or "")
     cache = read_json_file(VIDEO_SOURCE_CACHE_FILE, {})
@@ -986,6 +1024,19 @@ def video_source_url(entry: dict[str, Any]) -> str:
     cache[entry_id] = {"video_source_url": source, "checked_at": now_iso()}
     write_json_atomic(VIDEO_SOURCE_CACHE_FILE, cache)
     return source
+
+
+def video_playback(entry: dict[str, Any]) -> dict[str, str]:
+    source_page = str(entry.get("video_url") or "").strip()
+    platform, embed_url = official_video_embed_url(source_page)
+    direct_source = video_source_url(entry) if platform == "kwai" else ""
+    return {
+        "platform": platform,
+        "playback_type": "direct_mp4" if direct_source else ("official_embed" if embed_url else "external_link"),
+        "video_source_url": direct_source,
+        "embed_url": embed_url,
+        "video_url": source_page,
+    }
 
 
 def thumbnail_url(entry: dict[str, Any]) -> str:
@@ -2872,8 +2923,9 @@ function coverImage(e){{return String(e.preview_image_url||e.cover_url||e.storyb
 function storyboardImage(e){{return String(e.storyboard_image_url||e.storyboard_url||scriptImage(e)||"").trim()}}
 function detailCover(e){{return `<div class="detail-cover"><img src="${{esc(coverImage(e))}}" loading="eager" alt="Cover"></div>`}}
 function videoPreview(e){{const url=esc(e.video_url);const img=esc(e.thumbnail_url);return `<section class="video-section"><h3 class="video-section-title">${{lang==="zh"?"看看其他人做的：":"Veja como outros criadores fizeram:"}}<span>${{lang==="zh"?"参考视频":"Referencia"}}</span></h3><div class="video-box" data-video-box="${{esc(e.entry_id)}}" data-video-src="${{url}}"><img src="${{img}}" alt="video preview"><div class="video-fallback">${{url ? (lang==="zh"?"视频预览加载中":"Carregando preview") : ""}}</div></div></section>`}}
-async function fetchVideoSource(id){{const r=await fetch(`/api/creator/video-source/${{encodeURIComponent(id)}}?_=${{Date.now()}}`);const d=await r.json();if(!r.ok)throw new Error(d.error||"video failed");return d.video_source_url||""}}
-function hydrateVideo(e){{if(!e.video_url)return;setTimeout(async()=>{{const box=document.querySelector(`[data-video-box="${{e.entry_id}}"]`);if(!box||box.querySelector("video")||box.querySelector("iframe"))return;try{{const source=await fetchVideoSource(e.entry_id);if(source){{box.innerHTML=`<video src="${{esc(source)}}" poster="${{esc(e.thumbnail_url)}}" controls playsinline preload="metadata"></video>`;return}}}}catch(err){{}}box.innerHTML=`<iframe src="${{esc(e.video_url)}}" title="video preview" loading="lazy" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" sandbox="allow-scripts allow-same-origin allow-popups allow-presentation"></iframe><div class="video-fallback">${{lang==="zh"?"如果平台禁止内嵌播放，这里可能只显示空白。":"Se a plataforma bloquear embed, o preview pode aparecer em branco."}}</div>`}},350)}}
+async function fetchVideoPlayback(id){{const r=await fetch(`/api/creator/video-source/${{encodeURIComponent(id)}}?_=${{Date.now()}}`);const d=await r.json();if(!r.ok)throw new Error(d.error||"video failed");return d}}
+function originalVideoLink(url){{if(!url)return "";const label=lang==="zh"?"打开原视频":"Abrir vídeo original";return `<a href="${{esc(url)}}" target="_blank" rel="noopener noreferrer" style="display:flex;align-items:center;justify-content:center;min-height:42px;margin:0 0 14px;border:1px solid #ff5f0033;border-radius:999px;background:#fff7f0;color:#ff5f00;font-size:13px;font-weight:900;text-decoration:none">${{label}} ↗</a>`}}
+function hydrateVideo(e){{if(!e.video_url)return;setTimeout(async()=>{{const box=document.querySelector(`[data-video-box="${{e.entry_id}}"]`);if(!box||box.querySelector("video")||box.querySelector("iframe"))return;let playback={{}};try{{playback=await fetchVideoPlayback(e.entry_id)}}catch(err){{}}const original=String(playback.video_url||e.video_url||"");if(playback.video_source_url){{box.innerHTML=`<video src="${{esc(playback.video_source_url)}}" poster="${{esc(e.thumbnail_url)}}" controls playsinline preload="metadata"></video>`;box.insertAdjacentHTML("afterend",originalVideoLink(original));return}}if(playback.embed_url){{box.classList.add("video-embed");box.style.aspectRatio="9 / 16";box.style.height="auto";box.style.maxHeight="none";box.innerHTML=`<iframe src="${{esc(playback.embed_url)}}" title="video preview" loading="lazy" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin" sandbox="allow-scripts allow-same-origin allow-popups allow-presentation allow-forms"></iframe>`;box.insertAdjacentHTML("afterend",originalVideoLink(original));return}}box.innerHTML=`<img src="${{esc(e.thumbnail_url)}}" alt="video preview"><div class="video-fallback">${{lang==="zh"?"该平台暂不支持站内播放，可打开原视频查看。":"Esta plataforma ainda não permite reprodução aqui. Abra o vídeo original."}}</div>`;box.insertAdjacentHTML("afterend",originalVideoLink(original))}},350)}}
 function scriptLoading(){{return `<section class="script-loading"><b>${{lang==="zh"?"脚本加载中请耐心等待":"Roteiro carregando, aguarde um momento"}}</b><span>${{lang==="zh"?"正在整理完整脚本内容，加载完成后会自动显示。":"Estamos preparando o roteiro completo. Ele aparecerá automaticamente."}}</span><div class="script-progress" aria-hidden="true"></div></section>`}}
 function normalizeLabel(s){{return String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[：:]/g,"").trim()}}
 function compactText(s){{return String(s||"").replace(/\s+/g," ").trim()}}
@@ -3124,7 +3176,7 @@ class Handler(BaseHTTPRequestHandler):
             if not entry:
                 self.send_json({"error": "Script not found."}, status=404)
                 return
-            self.send_json({"entry_id": entry_id, "video_source_url": video_source_url(entry), "video_url": abs_url(entry.get("video_url"), "")})
+            self.send_json({"entry_id": entry_id, **video_playback(entry)})
             return
         if parsed.path == "/api/admin/submissions":
             if not self.require_admin():
