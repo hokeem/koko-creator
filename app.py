@@ -1908,6 +1908,62 @@ def append_analytics_event(
     return event
 
 
+def script_id_from_url(value: object) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(text)
+        match = re.fullmatch(r"/script/([0-9a-f]{32})", parsed.path or "")
+        if match:
+            return match.group(1)
+        query = urllib.parse.parse_qs(parsed.query or "")
+        candidate = str((query.get("script") or [""])[0] or "")
+        if re.fullmatch(r"[0-9a-f]{32}", candidate):
+            return candidate
+    except Exception:
+        pass
+    return ""
+
+
+def visitor_cookie_header(visitor_id: str) -> tuple[str, str]:
+    return ("Set-Cookie", f"{VISITOR_COOKIE}={urllib.parse.quote(visitor_id)}; Path=/; Max-Age=31536000; SameSite=Lax")
+
+
+def record_site_open(headers: Any, path: str, *, account: dict[str, Any] | None = None, script_id: str = "", source: str = "server") -> str:
+    visitor_id = analytics_visitor_id(headers)
+    page_type = "script" if script_id else "portal"
+    append_analytics_event(
+        {"event": "site_open", "page_type": page_type, "script_id": script_id, "path": path, "meta": {"source": source}},
+        headers,
+        account=account,
+        visitor_id=visitor_id,
+    )
+    if script_id:
+        append_analytics_event(
+            {"event": "script_open", "page_type": "script", "script_id": script_id, "path": path, "meta": {"source": source}},
+            headers,
+            account=account,
+            visitor_id=visitor_id,
+        )
+    return visitor_id
+
+
+def record_login_referer_open(headers: Any, account: dict[str, Any]) -> None:
+    referer = str(headers.get("Referer") or "")
+    if not referer:
+        return
+    script_id = script_id_from_url(referer)
+    try:
+        parsed = urllib.parse.urlparse(referer)
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+    except Exception:
+        path = referer[:260]
+    record_site_open(headers, path, account=account, script_id=script_id, source="after_login")
+
+
 def parse_iso_time(value: object) -> datetime | None:
     try:
         text = str(value or "")
@@ -2046,7 +2102,7 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
         is_script = page_type == "script" or bool(script_id)
         person = person_from_event(event)
         actor_key = person.get("account_id") or person.get("visitor_id") or str(event.get("event_id") or "")
-        if name == "page_view":
+        if name == "site_open":
             detail = {
                 **person,
                 "time": str(event.get("created_at") or ""),
@@ -2056,15 +2112,23 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
                 "script_id": script_id,
                 "script_title": cached_script_title(script_id) if script_id else "",
             }
-            if is_script:
-                row["script_opens"] = int(row.get("script_opens") or 0) + 1
-                row["share_link_opens"] = int(row.get("share_link_opens") or 0) + 1
-                row["_script_people"][actor_key] = person
-                append_timeline_detail(row, "script_open_details", detail)
-            else:
-                row["platform_opens"] = int(row.get("platform_opens") or 0) + 1
-                row["_platform_people"][actor_key] = person
-                append_timeline_detail(row, "platform_open_details", detail)
+            row["platform_opens"] = int(row.get("platform_opens") or 0) + 1
+            row["_platform_people"][actor_key] = person
+            append_timeline_detail(row, "platform_open_details", detail)
+        if name in {"script_open", "detail_open"} and script_id:
+            detail = {
+                **person,
+                "time": str(event.get("created_at") or ""),
+                "path": str(event.get("path") or ""),
+                "referer": str(event.get("referer") or ""),
+                "source": "分享链接" if name == "script_open" else "站内点开",
+                "script_id": script_id,
+                "script_title": cached_script_title(script_id),
+            }
+            row["script_opens"] = int(row.get("script_opens") or 0) + 1
+            row["share_link_opens"] = int(row.get("share_link_opens") or 0) + 1
+            row["_script_people"][actor_key] = person
+            append_timeline_detail(row, "script_open_details", detail)
         if name == "page_duration":
             duration_seconds = round(int(event.get("duration_ms") or 0) / 1000)
             if is_script:
@@ -2137,11 +2201,10 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
             name = str(event.get("event") or "")
             page_type = str(event.get("page_type") or "")
             script_id = str(event.get("script_id") or "")
-            if name == "page_view":
-                if page_type == "script" or script_id:
-                    script_open_count += 1
-                else:
-                    platform_open_count += 1
+            if name == "site_open":
+                platform_open_count += 1
+            if name in {"script_open", "detail_open"} and script_id:
+                script_open_count += 1
             if name == "page_duration":
                 duration_ms = int(event.get("duration_ms") or 0)
                 if page_type == "script" or script_id:
@@ -2153,7 +2216,7 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
                     platform_duration_ms += duration_ms
             if name in CLICK_EVENT_LABELS:
                 clicks[name] = clicks.get(name, 0) + 1
-            if script_id and name == "page_view":
+            if script_id and name in {"script_open", "detail_open"}:
                 row = script_stats.setdefault(script_id, {"script_id": script_id, "title": cached_script_title(script_id), "views": 0, "duration_ms": 0})
                 row["views"] = int(row.get("views") or 0) + 1
         has_behavior = bool(
@@ -3046,11 +3109,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def send_html(self, body: str) -> None:
+    def send_html(self, body: str, headers: list[tuple[str, str]] | None = None) -> None:
         raw = body.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        for key, value in headers or []:
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -3114,7 +3179,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
             return
         if parsed.path in {"/", "/creator-portal"}:
-            self.send_html(page_html())
+            visitor_id = record_site_open(self.headers, self.path, account=current_account(self.headers), source="document")
+            self.send_html(page_html(), headers=[visitor_cookie_header(visitor_id)])
             return
         if parsed.path in {"/creator-survey", "/creator-intake"}:
             self.send_html(survey_html())
@@ -3209,7 +3275,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(recommendation_payload(selected, limit))
             return
         if parsed.path.startswith("/script/"):
-            self.send_html(page_html())
+            script_match = re.fullmatch(r"/script/([0-9a-f]{32})", parsed.path)
+            script_id = script_match.group(1) if script_match else ""
+            visitor_id = record_site_open(self.headers, self.path, account=current_account(self.headers), script_id=script_id, source="script_link")
+            self.send_html(page_html(), headers=[visitor_cookie_header(visitor_id)])
             return
         if parsed.path.startswith("/api/creator/scripts/"):
             entry_id = parsed.path.rsplit("/", 1)[-1]
@@ -3397,6 +3466,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             account = mark_account_registered(account_id, action="login") or account
             append_analytics_event({"event": "login", "page_type": "auth", "path": parsed.path}, self.headers, account=account)
+            record_login_referer_open(self.headers, account)
             public = public_account(account, include_state=True)
             raw = json.dumps({
                 "ok": True,
