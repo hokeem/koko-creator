@@ -1183,6 +1183,34 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
     return submission
 
 
+def delete_submissions_by_ids(submission_ids: list[str]) -> dict[str, Any]:
+    ids = {str(item or "").strip() for item in submission_ids if str(item or "").strip()}
+    if not ids:
+        return {"ok": True, "deleted": 0, "missing_ids": [], "total_before": 0, "total_after": 0}
+    submissions = read_json_file(SUBMISSIONS_FILE, [])
+    if not isinstance(submissions, list):
+        submissions = []
+    total_before = len(submissions)
+    kept: list[dict[str, Any]] = []
+    deleted_ids: list[str] = []
+    for item in submissions:
+        if isinstance(item, dict) and str(item.get("submission_id") or "") in ids:
+            deleted_ids.append(str(item.get("submission_id") or ""))
+            continue
+        kept.append(item)
+    if len(kept) != total_before:
+        write_json_atomic(SUBMISSIONS_FILE, kept[:1000])
+    missing_ids = sorted(ids - set(deleted_ids))
+    return {
+        "ok": True,
+        "deleted": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+        "missing_ids": missing_ids,
+        "total_before": total_before,
+        "total_after": len(kept),
+    }
+
+
 def save_access_application(payload: dict[str, Any], headers: Any) -> dict[str, Any]:
     phone_raw = str(payload.get("phone") or payload.get("account_id") or "").strip()
     phone = normalize_account_key(phone_raw)
@@ -2957,6 +2985,13 @@ async function openDetail(id){{analyticsCurrentScriptId=id||"";const modal=docum
 async function submitVideo(id){{const input=document.querySelector(`[data-submit-url="${{id}}"]`);const status=document.querySelector(`#submit-status-${{id}}`);const video_url=String(input?.value||"").trim();const duplicateText="作品已上传，无需重复上传";if(!creatorUser){{if(status)status.textContent=lang==="zh"?"请先用手机号登录。":"Entre com seu telefone primeiro.";openAuth("login");return}}if(!video_url){{status.textContent=t("submitError");return}}status.textContent=lang==="zh"?"提交中...":"Enviando...";try{{const r=await fetch("/api/creator/submissions",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{entry_id:id,video_url,creator_id:creatorUser?.account_id||creatorUser?.phone||"creator"}})}});const d=await r.json().catch(()=>({{}}));if(r.status===409||d.code==="duplicate_submission"){{if(status)status.textContent=duplicateText;alert(duplicateText);return}}if(!r.ok)throw new Error(d.error||"submit failed");status.textContent=t("submitOk");await loadSubmissions();setStatus(id,"finished");savedTab="finished"}}catch(e){{status.textContent=t("submitError")}}}}
 function closeDetail(){{trackDuration(true);analyticsCurrentScriptId="";document.querySelectorAll("#modal video").forEach(v=>{{try{{v.pause();v.removeAttribute("src");v.load()}}catch(e){{}}}});document.querySelector("#modal").classList.remove("active");document.querySelector("#detail").innerHTML=""}}
 function handleProfileImage(kind,file){{if(!file||!file.type.startsWith("image/"))return;const reader=new FileReader();reader.onload=()=>{{profileUi[kind]=String(reader.result||"");saveProfileUi();updateProfileImages()}};reader.readAsDataURL(file)}}
+function ensureDetailEnhancementStyles(){{if(document.querySelector("#detail-enhancement-style"))return;const style=document.createElement("style");style.id="detail-enhancement-style";style.textContent=`.detail-top{{display:flex!important;align-items:center!important;justify-content:flex-start!important;gap:10px!important}}.reference-jump{{border:0;border-radius:999px;min-height:42px;width:min(330px,calc(100vw - 92px));padding:0 18px;background:#ff5f00;color:white;font-size:14px;font-weight:950;box-shadow:0 10px 22px rgba(255,95,0,.30);animation:jumpPulse 1.25s ease-in-out infinite;white-space:normal;line-height:1.12;text-align:center}}@keyframes jumpPulse{{0%,100%{{transform:scale(1);box-shadow:0 10px 22px rgba(255,95,0,.28)}}50%{{transform:scale(1.035);box-shadow:0 14px 30px rgba(255,95,0,.44)}}}}.video-section{{scroll-margin-top:74px}}.script-shot-info.no-dialogue{{grid-template-rows:1fr!important}}`;document.head.appendChild(style)}}
+function emptyDialogueText(text){{const normalized=String(text||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/\s+/g," ").trim();return !normalized||["-","—","sem conteudo","sem dialogo","n/a","na","nao ha dialogo","sem fala","sem falas"].includes(normalized)}}
+function ensureReferenceJumpButton(){{const top=document.querySelector("#detail .detail-top");if(!top||top.querySelector("[data-reference-jump]"))return;const video=document.querySelector("#detail .video-section");if(!video)return;const button=document.createElement("button");button.type="button";button.className="reference-jump";button.dataset.referenceJump="1";button.textContent="Veja como outras pessoas gravaram este roteiro";top.appendChild(button)}}
+function pruneEmptyDialogueCards(){{document.querySelectorAll("#detail .script-shot-info").forEach(info=>{{[...info.querySelectorAll(".script-shot-box")].forEach(box=>{{const title=normalizeLabel(box.querySelector("b")?.textContent||"");if(!title.includes("dialogos")&&!title.includes("dialogo"))return;const body=box.querySelector("p")?.textContent||"";if(emptyDialogueText(body)){{box.remove();info.classList.add("no-dialogue")}}}})}})}}
+function refreshDetailEnhancements(){{ensureDetailEnhancementStyles();ensureReferenceJumpButton();pruneEmptyDialogueCards()}}
+new MutationObserver(()=>setTimeout(refreshDetailEnhancements,0)).observe(document.querySelector("#detail"),{{childList:true,subtree:true}})
+document.addEventListener("click",e=>{{const jump=e.target.closest("[data-reference-jump]");if(!jump)return;track("reference_video_jump",{{script_id:analyticsCurrentScriptId||""}});document.querySelector("#detail .video-section")?.scrollIntoView({{behavior:"smooth",block:"start"}})}})
 document.addEventListener("click",async e=>{{if(e.target.closest("[data-logout]")){{logout();return}}if(e.target.closest("[data-feature-next]")){{track("feature_next");featuredOffset++;renderDashboard();return}}const upload=e.target.closest("[data-upload-trigger]");if(upload){{document.querySelector(`#profile-${{upload.dataset.uploadTrigger}}-input`)?.click();return}}const jump=e.target.closest("[data-tab-jump]");if(jump){{savedTab=jump.dataset.tabJump;show("saved");return}}const authOpen=e.target.closest("[data-auth-open]");if(authOpen){{openAuth(authOpen.dataset.authOpen||"login");return}}if(e.target.closest("[data-auth-close]")){{closeAuth();return}}const authToggle=e.target.closest("[data-auth-toggle]");if(authToggle){{setAuthMode(authMode==="register"?"login":"register");return}}const reselect=e.target.closest("[data-reselect]");if(reselect){{show("choose");return}}const stepNav=e.target.closest("[data-step]");if(stepNav){{step=Number(stepNav.dataset.step)||0;renderQuestion();return}}if(e.target.closest("#prev-step")){{goStep(-1);return}}const tab=e.target.closest("[data-tab]");if(tab){{savedTab=tab.dataset.tab;renderSaved();return}}const shootMonth=e.target.closest("[data-shoot-month]");if(shootMonth){{shiftScheduleMonth(Number(shootMonth.dataset.shootMonth)||0);return}}const shootDate=e.target.closest("[data-shoot-date]");if(shootDate){{scheduleViewDate=shootDate.dataset.shootDate;renderScheduleFeed();return}}const d=e.target.closest("[data-detail]");if(d){{track("detail_open",{{script_id:d.dataset.detail||""}});openDetail(d.dataset.detail);return}}if(e.target.closest("[data-close]")||e.target.id==="modal"){{closeDetail();return}}const copy=e.target.closest("[data-copy-share]");if(copy){{const id=copy.dataset.copyShare;track("share_click",{{script_id:id}});const ok=await copyText(shareUrl(id));showShareLink(id,ok);const label=copy.querySelector("span");if(label)label.textContent=ok?(lang==="zh"?"已复制":"Copiado"):(lang==="zh"?"复制失败，请手动复制":"Copie manualmente");return}}const scrollSubmit=e.target.closest("[data-submit-scroll]");if(scrollSubmit){{track("submit_click",{{script_id:scrollSubmit.dataset.submitScroll||""}});document.querySelector(`[data-submit-url="${{scrollSubmit.dataset.submitScroll}}"]`)?.scrollIntoView({{behavior:"smooth",block:"center"}});return}}const sub=e.target.closest("[data-submit]");if(sub){{track("submit_click",{{script_id:sub.dataset.submit||""}});submitVideo(sub.dataset.submit);return}}const st=e.target.closest("[data-status]");if(st){{if(st.dataset.status==="saved")track("save_click",{{script_id:st.dataset.entry||""}});const inDetail=!!st.closest("#detail");setStatus(st.dataset.entry,st.dataset.status);if(inDetail){{const fresh=entry(st.dataset.entry);if(fresh)renderDetail(fresh)}}else{{const label=st.querySelector("span");if(label)label.textContent=t(st.dataset.status==="saved"?"saved":st.dataset.status==="planned"?"plan":"save")}}return}}const go=e.target.closest("[data-go]");if(go){{if(go.dataset.go==="all-scripts")track("all_scripts_open");if(go.dataset.go==="saved")track("profile_open");if(go.dataset.savedTab)savedTab=go.dataset.savedTab;show(go.dataset.go);return}}const ans=e.target.closest("[data-answer]");if(ans){{const q=questions.find(item=>item.id===ans.dataset.answer);if(isMultipleQuestion(q)){{const values=answerValues(q.id);answers[q.id]=values.includes(ans.dataset.value)?values.filter(v=>v!==ans.dataset.value):[...values,ans.dataset.value];normalizeAnswers();saveProfile();renderQuestion();}}else{{answers[ans.dataset.answer]=ans.dataset.value;normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard");}}return}}if(e.target.closest("#next-step")){{normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard")}}}});
 document.addEventListener("click",e=>{{const dateBtn=e.target.closest("[data-schedule-date]");if(dateBtn){{scheduleSelectedDate=dateBtn.dataset.scheduleDate;renderCalendar();return}}if(e.target.closest("[data-schedule-close]")){{closeScheduleModal();return}}if(e.target.closest("[data-schedule-confirm]")){{if(scheduleDraftId){{saveScheduleItem(scheduleDraftId,scheduleSelectedDate||todayKey());savedTab="schedule";closeScheduleModal();show("saved")}}return}}}});document.addEventListener("click",e=>{{const st=e.target.closest("[data-status]");if(st&&st.dataset.status==="saved"){{const id=st.dataset.entry;setTimeout(()=>openScheduleModal(id),80)}}}});
 document.querySelector("#auth-form").addEventListener("submit",handleAuthSubmit);
@@ -3463,6 +3498,18 @@ class Handler(BaseHTTPRequestHandler):
                 payload = self.read_body()
                 limit = max(1, min(1000, int(payload.get("limit") or 200)))
                 self.send_json(backfill_submission_creators(limit), status=200)
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+            return
+        if parsed.path == "/api/admin/submissions/delete":
+            if not self.require_admin():
+                return
+            try:
+                payload = self.read_body()
+                submission_ids = payload.get("submission_ids") or payload.get("ids") or []
+                if not isinstance(submission_ids, list):
+                    raise ValueError("submission_ids must be a list.")
+                self.send_json(delete_submissions_by_ids(submission_ids), status=200)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
             return
