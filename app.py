@@ -1133,7 +1133,38 @@ def link_metadata(url: str) -> dict[str, str]:
     return meta
 
 
-def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
+def match_submission_creator_by_account(
+    account: dict[str, Any],
+    profiles: list[dict[str, Any]] | None = None,
+    account_lookup: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    profiles = profiles if profiles is not None else load_creator_profiles()
+    account_lookup = account_lookup if account_lookup is not None else account_alias_lookup()
+    account_keys = account_aliases(account)
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        account_key = str(profile.get("account_id") or profile.get("phone") or profile.get("kwai_id") or profile.get("uid") or "")
+        linked_account = find_account_from_lookup(account_key, account_lookup)
+        creator_keys = {
+            normalize_account_key(profile.get("profile_id") or ""),
+            normalize_account_key(profile.get("account_id") or ""),
+            normalize_account_key(profile.get("phone") or ""),
+            normalize_account_key(profile.get("uid") or ""),
+            normalize_kwai_id(profile.get("kwai_id") or ""),
+        }
+        creator_keys.update(account_aliases(linked_account) if linked_account else set())
+        creator_keys = {item for item in creator_keys if item}
+        if account_keys.intersection(creator_keys):
+            return {
+                "profile_id": str(profile.get("profile_id") or ""),
+                "name": str(profile.get("name") or profile.get("kwai_id") or "Kwai creator"),
+                "kwai_id": str(profile.get("kwai_id") or ""),
+            }
+    return None
+
+
+def save_submission(payload: dict[str, Any], *, account: dict[str, Any] | None = None) -> dict[str, Any]:
     entry_id = str(payload.get("entry_id") or "").strip()
     video_url = str(payload.get("video_url") or "").strip()
     if not re.fullmatch(r"[0-9a-f]{32}", entry_id):
@@ -1146,7 +1177,7 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
     normalized_video_url = normalize_submission_video_url(video_url)
     meta = link_metadata(video_url)
     fallback_thumb = f"/api/creator/thumbnail/{entry_id}.webp"
-    creator_id = canonical_account_key(str(payload.get("creator_id") or "local_creator"))
+    creator_id = canonical_account_key(str((account or {}).get("account_id") or payload.get("creator_id") or "local_creator"))
     submissions = read_json_file(SUBMISSIONS_FILE, [])
     if not isinstance(submissions, list):
         submissions = []
@@ -1171,7 +1202,7 @@ def save_submission(payload: dict[str, Any]) -> dict[str, Any]:
         "status": "pending_review",
         "created_at": now_iso(),
     }
-    matched_creator = match_submission_creator(submission)
+    matched_creator = match_submission_creator_by_account(account) if account else None
     if matched_creator:
         submission.update({
             "creator_profile_id": matched_creator.get("profile_id", ""),
@@ -3283,12 +3314,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/creator/submissions":
             account = current_account(self.headers)
+            if not account:
+                self.send_json({"error": "Login required."}, status=401)
+                return
             submissions = read_json_file(SUBMISSIONS_FILE, [])
             if not isinstance(submissions, list):
                 submissions = []
-            if account:
-                account_id = str(account.get("account_id") or "")
-                submissions = [item for item in submissions if isinstance(item, dict) and str(item.get("creator_id") or "") == account_id]
+            account_id = str(account.get("account_id") or "")
+            submissions = [item for item in submissions if isinstance(item, dict) and str(item.get("creator_id") or "") == account_id]
             self.send_json({"submissions": submissions})
             return
         if parsed.path == "/api/creator/sync-status":
@@ -3541,9 +3574,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = self.read_body()
                 account = current_account(self.headers)
-                if account:
-                    payload["creator_id"] = str(account.get("account_id") or "")
-                submission = save_submission(payload)
+                if not account:
+                    self.send_json({"error": "Login required."}, status=401)
+                    return
+                payload["creator_id"] = str(account.get("account_id") or "")
+                submission = save_submission(payload, account=account)
                 append_analytics_event(
                     {"event": "submission_created", "page_type": "script", "script_id": submission.get("entry_id"), "path": parsed.path},
                     self.headers,
