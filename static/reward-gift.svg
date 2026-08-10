@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="box" x1="20" x2="108" y1="38" y2="112">
+      <stop stop-color="#ff7a00"/>
+      <stop offset=".55" stop-color="#ff4f00"/>
+      <stop offset="1" stop-color="#c23800"/>
+    </linearGradient>
+    <linearGradient id="ribbon" x1="34" x2="96" y1="22" y2="116">
+      <stop stop-color="#fff5b5"/>
+      <stop offset=".55" stop-color="#ffd64e"/>
+      <stop offset="1" stop-color="#f7a900"/>
+    </linearGradient>
+  </defs>
+  <path fill="#ffb16b" d="M18 50h92a8 8 0 0 1 8 8v12H10V58a8 8 0 0 1 8-8z"/>
+  <path fill="url(#box)" d="M18 68h92v43a9 9 0 0 1-9 9H27a9 9 0 0 1-9-9z"/>
+  <path fill="url(#ribbon)" d="M56 50h16v70H56z"/>
+  <path fill="#ffe777" d="M10 60h108v12H10z"/>
+  <path fill="#ffcf45" d="M40 20c12-2 18 10 24 28-18-2-34-8-34-18 0-5 4-9 10-10z"/>
+  <path fill="#ffcf45" d="M88 20c-12-2-18 10-24 28 18-2 34-8 34-18 0-5-4-9-10-10z"/>
+  <path fill="#fff7c0" d="M48 28c5 1 8 5 11 13-9-2-18-5-18-10 0-2 3-3 7-3zm32 0c-5 1-8 5-11 13 9-2 18-5 18-10 0-2-3-3-7-3z" opacity=".75"/>
+</svg>
