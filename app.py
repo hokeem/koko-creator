@@ -54,7 +54,7 @@ OVERRIDES_FILE = DATA_ROOT / "creator_script_overrides.json"
 SOURCE_URL = os.environ.get("CREATOR_LIBRARY_SOURCE_URL", "https://koko-kwai-coach.onrender.com/api/library")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://koko-fpml.onrender.com").rstrip("/")
 SYNC_INTERVAL_SEC = int(os.environ.get("CREATOR_LIBRARY_SYNC_INTERVAL_SEC", "86400"))
-ADMIN_PASSWORD = os.environ.get("KOKO_CREATOR_ADMIN_PASSWORD", "koko")
+ADMIN_PASSWORD = os.environ.get("KOKO_CREATOR_ADMIN_PASSWORD", "kokokwai@2026")
 ADMIN_COOKIE = "koko_creator_admin"
 CREATOR_AUTH_COOKIE = "koko_creator_auth"
 VISITOR_COOKIE = "koko_creator_visitor"
@@ -1688,7 +1688,7 @@ def resolve_kwai_id_from_video_link(url: str, timeout: int = 12) -> str:
 
 
 def account_signature(account_id: str) -> str:
-    secret = (ADMIN_PASSWORD or "koko").encode("utf-8")
+    secret = (ADMIN_PASSWORD or "kokokwai@2026").encode("utf-8")
     return hmac.new(secret, account_id.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
