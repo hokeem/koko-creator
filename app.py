@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import html
 import http.client
@@ -3358,12 +3359,22 @@ async function bootstrap(){{if(creatorUser)await loadAccountState();applyLang();
 class Handler(BaseHTTPRequestHandler):
     server_version = "KokoCreator/1.0"
 
+    def compressed_response(self, raw: bytes) -> tuple[bytes, bool]:
+        accepts_gzip = "gzip" in str(self.headers.get("Accept-Encoding") or "").lower()
+        if not accepts_gzip or len(raw) < 1024:
+            return raw, False
+        return gzip.compress(raw, compresslevel=5), True
+
     def send_json(self, payload: Any, status: int = 200, headers: list[tuple[str, str]] | None = None) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode()
+        raw, compressed = self.compressed_response(raw)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Vary", "Accept-Encoding")
+        if compressed:
+            self.send_header("Content-Encoding", "gzip")
         for key, value in headers or []:
             self.send_header(key, value)
         self.end_headers()
@@ -3371,9 +3382,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_html(self, body: str, headers: list[tuple[str, str]] | None = None) -> None:
         raw = body.encode()
+        raw, compressed = self.compressed_response(raw)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Vary", "Accept-Encoding")
+        if compressed:
+            self.send_header("Content-Encoding", "gzip")
         for key, value in headers or []:
             self.send_header(key, value)
         self.end_headers()
