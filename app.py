@@ -1384,6 +1384,26 @@ def match_submission_creator_by_account(
     return None
 
 
+def match_submission_creator_by_kwai_id(
+    kwai_id: str,
+    profiles: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    normalized = normalize_kwai_id(kwai_id).lower()
+    if not normalized:
+        return None
+    profiles = profiles if profiles is not None else load_creator_profiles()
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        if normalize_kwai_id(profile.get("kwai_id") or "").lower() == normalized:
+            return {
+                "profile_id": str(profile.get("profile_id") or ""),
+                "name": str(profile.get("name") or profile.get("kwai_id") or "Kwai creator"),
+                "kwai_id": str(profile.get("kwai_id") or ""),
+            }
+    return None
+
+
 def save_submission(payload: dict[str, Any], *, account: dict[str, Any] | None = None) -> dict[str, Any]:
     entry_id = str(payload.get("entry_id") or "").strip()
     video_url = str(payload.get("video_url") or "").strip()
@@ -1422,7 +1442,12 @@ def save_submission(payload: dict[str, Any], *, account: dict[str, Any] | None =
         "status": "pending_review",
         "created_at": now_iso(),
     }
-    matched_creator = match_submission_creator_by_account(account) if account else None
+    # A video author's public Kwai ID is more specific than a login alias. Some
+    # legacy accounts share aliases, so account-only matching can select the
+    # wrong creator profile even when the video URL identifies its owner.
+    matched_creator = match_submission_creator_by_kwai_id(detected_kwai_id)
+    if not matched_creator and account:
+        matched_creator = match_submission_creator_by_account(account)
     if matched_creator:
         submission.update({
             "creator_profile_id": matched_creator.get("profile_id", ""),
@@ -1802,6 +1827,9 @@ def match_submission_creator(
     account_lookup = account_lookup if account_lookup is not None else account_alias_lookup()
     submission_creator = normalize_account_key(submission.get("creator_id") or "")
     submission_kwai = submission_kwai_id(submission)
+    exact_kwai_match = match_submission_creator_by_kwai_id(submission_kwai, profiles)
+    if exact_kwai_match:
+        return exact_kwai_match
     for profile in profiles:
         if not isinstance(profile, dict):
             continue
@@ -1816,8 +1844,7 @@ def match_submission_creator(
         }
         creator_keys.update(account_aliases(account) if account else set())
         creator_keys = {item for item in creator_keys if item}
-        creator_kwai = normalize_kwai_id(profile.get("kwai_id") or "")
-        if (submission_creator and submission_creator in creator_keys) or (submission_kwai and creator_kwai and submission_kwai == creator_kwai):
+        if submission_creator and submission_creator in creator_keys:
             return {
                 "profile_id": str(profile.get("profile_id") or ""),
                 "name": str(profile.get("name") or profile.get("kwai_id") or "Kwai creator"),
