@@ -2269,6 +2269,70 @@ def script_title_for_id(entry_id: str) -> str:
     return str(entry.get("title") or "") if entry else ""
 
 
+def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
+    """Return the three dashboard counters without building analytics details."""
+    days = max(1, min(180, int(days or 180)))
+    accounts = [item for item in load_accounts() if isinstance(item, dict)]
+    alias_lookup = account_alias_lookup(accounts)
+    account_alias_sets = {id(account): account_aliases(account) for account in accounts}
+    test_accounts = {id(account) for account in accounts if "666" in account_alias_sets[id(account)]}
+    events = [event for event in load_analytics_events() if event_in_days(event, days)]
+    submissions_raw = read_json_file(SUBMISSIONS_FILE, [])
+    submissions = [item for item in (submissions_raw if isinstance(submissions_raw, list) else []) if isinstance(item, dict)]
+
+    visitor_accounts: dict[str, dict[str, Any]] = {}
+    for event in events:
+        visitor_id = str(event.get("visitor_id") or "").strip()
+        account = find_account_from_lookup(str(event.get("account_id") or ""), alias_lookup)
+        if visitor_id and account:
+            visitor_accounts[visitor_id] = account
+
+    script_opens = 0
+    for event in events:
+        if str(event.get("event") or "") not in {"script_open", "detail_open"}:
+            continue
+        if not str(event.get("script_id") or "").strip():
+            continue
+        account = find_account_from_lookup(str(event.get("account_id") or ""), alias_lookup)
+        if not account:
+            account = visitor_accounts.get(str(event.get("visitor_id") or "").strip())
+        if account and id(account) not in test_accounts:
+            script_opens += 1
+
+    matched_submission_accounts: set[int] = set()
+    submission_count = 0
+    for submission in submissions:
+        candidates = [
+            canonical_account_key(str(submission.get("creator_id") or "")),
+            normalize_account_key(normalize_kwai_id(str(submission.get("detected_kwai_id") or ""))),
+            normalize_account_key(normalize_kwai_id(kwai_handle_from_url(str(submission.get("video_url") or "")))),
+        ]
+        account = next((alias_lookup[value] for value in candidates if value and value in alias_lookup), None)
+        if account and id(account) not in test_accounts:
+            submission_count += 1
+            matched_submission_accounts.add(id(account))
+
+    registered_users = sum(
+        1
+        for account in accounts
+        if id(account) not in test_accounts
+        and (
+            str(account.get("registration_status") or "") == "registered"
+            or id(account) in matched_submission_accounts
+        )
+    )
+    return {
+        "ok": True,
+        "days": days,
+        "generated_at": now_iso(),
+        "summary": {
+            "registered_users": registered_users,
+            "script_opens": script_opens,
+            "submissions": submission_count,
+        },
+    }
+
+
 def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False) -> dict[str, Any]:
     days = max(1, min(180, int(days or 30)))
     accounts = load_accounts()
@@ -3784,6 +3848,16 @@ class Handler(BaseHTTPRequestHandler):
                 days = 30
             include_inactive = (q.get("include_inactive") or ["0"])[0] == "1"
             self.send_json(creator_analytics_payload(days, include_inactive=include_inactive))
+            return
+        if parsed.path == "/api/admin/analytics-summary":
+            if not self.require_admin():
+                return
+            q = urllib.parse.parse_qs(parsed.query)
+            try:
+                days = max(1, min(180, int((q.get("days") or ["180"])[0] or "180")))
+            except Exception:
+                days = 180
+            self.send_json(creator_analytics_summary_payload(days))
             return
         if parsed.path == "/api/admin/intakes":
             if not self.require_admin():
