@@ -15,6 +15,8 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -80,6 +82,21 @@ DEFAULT_ALLOWED_ACCOUNTS = [
 DEFAULT_CONTENT_TYPE = "朋友整蛊"
 CANONICAL_CONTENT_TYPES = ["夫妻整蛊/冲突", "夫妻暧昧", "家庭整蛊", "朋友整蛊"]
 UNKNOWN_CONTENT_TYPES = {"待分类", "A classificar", "Sem categoria", "未分类", "", "Popular", "热门", "还没想好，给我热门"}
+
+ENTRY_SNAPSHOT_LOCK = threading.RLock()
+ENTRY_SNAPSHOT: dict[str, Any] = {
+    "signature": None,
+    "raw": [],
+    "entries": [],
+    "effective": [],
+    "by_id": {},
+}
+SYNC_CHECK_LOCK = threading.Lock()
+LAST_SYNC_CHECK_MONOTONIC = 0.0
+SYNC_IN_PROGRESS = False
+THUMB_WARM_LOCK = threading.Lock()
+THUMB_WARM_SEMAPHORE = threading.Semaphore(2)
+THUMB_WARMING: set[str] = set()
 
 
 QUESTIONS = [
@@ -487,6 +504,56 @@ def sync_library(force: bool = False) -> dict[str, Any]:
         return meta
 
 
+def maybe_sync_library() -> None:
+    """Refresh in the background so a creator never waits for the source service."""
+    global LAST_SYNC_CHECK_MONOTONIC, SYNC_IN_PROGRESS
+    now = time.monotonic()
+    if now - LAST_SYNC_CHECK_MONOTONIC < 60:
+        return
+    with SYNC_CHECK_LOCK:
+        now = time.monotonic()
+        if now - LAST_SYNC_CHECK_MONOTONIC < 60:
+            return
+        LAST_SYNC_CHECK_MONOTONIC = now
+        if SYNC_IN_PROGRESS:
+            return
+        SYNC_IN_PROGRESS = True
+
+    def run() -> None:
+        global SYNC_IN_PROGRESS
+        try:
+            sync_library(False)
+            invalidate_library_snapshot()
+        finally:
+            with SYNC_CHECK_LOCK:
+                SYNC_IN_PROGRESS = False
+
+    threading.Thread(target=run, name="creator-library-sync", daemon=True).start()
+
+
+def entry_files_signature() -> tuple[tuple[str, int, int], ...]:
+    files = [
+        LIBRARY_FILE,
+        MANUAL_LIBRARY_FILE,
+        SEED_LIBRARY_FILE,
+        SEED_MANUAL_LIBRARY_FILE,
+        OVERRIDES_FILE,
+    ]
+    signature: list[tuple[str, int, int]] = []
+    for path in files:
+        try:
+            stat = path.stat()
+            signature.append((str(path), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            signature.append((str(path), 0, 0))
+    return tuple(signature)
+
+
+def invalidate_library_snapshot() -> None:
+    with ENTRY_SNAPSHOT_LOCK:
+        ENTRY_SNAPSHOT["signature"] = None
+
+
 def upsert_manual_entry(entry: dict[str, Any]) -> None:
     entries = read_json_file(MANUAL_LIBRARY_FILE, [])
     if not isinstance(entries, list):
@@ -574,8 +641,7 @@ def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "entry": public_admin_entry(imported), "share_url": f"/script/{entry_id}"}
 
 
-def load_entries_raw() -> list[dict[str, Any]]:
-    sync_library(False)
+def load_entries_raw_files() -> list[dict[str, Any]]:
     manual = read_json_file(MANUAL_LIBRARY_FILE, [])
     manual_entries = [entry for entry in manual if isinstance(entry, dict)] if isinstance(manual, list) else []
     seed_manual = read_json_file(SEED_MANUAL_LIBRARY_FILE, [])
@@ -596,18 +662,48 @@ def load_entries_raw() -> list[dict[str, Any]]:
     return entries
 
 
+def refresh_entry_snapshot() -> dict[str, Any]:
+    maybe_sync_library()
+    signature = entry_files_signature()
+    with ENTRY_SNAPSHOT_LOCK:
+        if ENTRY_SNAPSHOT.get("signature") == signature:
+            return ENTRY_SNAPSHOT
+        raw = load_entries_raw_files()
+        overrides = load_overrides()
+        entries: list[dict[str, Any]] = []
+        by_id: dict[str, dict[str, Any]] = {}
+        for raw_entry in raw:
+            entry_id = str(raw_entry.get("entry_id") or "").strip()
+            override = overrides.get(entry_id)
+            if isinstance(override, dict) and override.get("deleted"):
+                continue
+            if isinstance(override, dict) and override.get("hidden"):
+                continue
+            normalized = normalized_entry(apply_entry_override(raw_entry, override))
+            entries.append(normalized)
+            if entry_id:
+                by_id[entry_id] = normalized
+        effective = sorted(
+            [entry for entry in entries if entry_is_effective(entry)],
+            key=admin_entry_sort_key,
+            reverse=True,
+        )
+        ENTRY_SNAPSHOT.update({
+            "signature": signature,
+            "raw": raw,
+            "entries": entries,
+            "effective": effective,
+            "by_id": by_id,
+        })
+        return ENTRY_SNAPSHOT
+
+
+def load_entries_raw() -> list[dict[str, Any]]:
+    return list(refresh_entry_snapshot()["raw"])
+
+
 def load_entries() -> list[dict[str, Any]]:
-    overrides = load_overrides()
-    entries: list[dict[str, Any]] = []
-    for entry in load_entries_raw():
-        entry_id = str(entry.get("entry_id") or "").strip()
-        override = overrides.get(entry_id)
-        if isinstance(override, dict) and override.get("deleted"):
-            continue
-        if isinstance(override, dict) and override.get("hidden"):
-            continue
-        entries.append(normalized_entry(apply_entry_override(entry, override)))
-    return entries
+    return list(refresh_entry_snapshot()["entries"])
 
 
 def entry_is_effective(entry: dict[str, Any]) -> bool:
@@ -675,11 +771,7 @@ def load_admin_entries(scope: str = "portal_visible") -> list[dict[str, Any]]:
 
 
 def effective_entries() -> list[dict[str, Any]]:
-    entries = [
-        entry for entry in load_entries()
-        if entry_is_effective(entry)
-    ]
-    return sorted(entries, key=admin_entry_sort_key, reverse=True)
+    return list(refresh_entry_snapshot()["effective"])
 
 
 def entry_summary(entry: dict[str, Any]) -> str:
@@ -1022,10 +1114,8 @@ def recommendation_payload(selected: list[str], limit: int = 80) -> dict[str, An
 
 
 def entry_by_id(entry_id: str) -> dict[str, Any] | None:
-    for entry in load_entries():
-        if str(entry.get("entry_id") or "") == entry_id:
-            return entry
-    return None
+    entry = refresh_entry_snapshot()["by_id"].get(entry_id)
+    return entry if isinstance(entry, dict) else None
 
 
 def admin_entry_by_id(entry_id: str) -> dict[str, Any] | None:
@@ -1162,13 +1252,50 @@ def fetch_image_bytes(url: str, timeout: int = 15) -> tuple[bytes, str]:
         return response.read(), response.headers.get("Content-Type") or "image/jpeg"
 
 
+def thumbnail_cache_file(entry: dict[str, Any], source_url: str) -> Path:
+    entry_id = str(entry.get("entry_id") or "").strip()
+    digest = hashlib.sha1(source_url.encode("utf-8")).hexdigest()[:12]
+    return THUMB_IMAGE_CACHE_DIR / f"{entry_id}-{digest}.webp"
+
+
+def cached_optimized_thumbnail(entry: dict[str, Any], source_url: str) -> bytes | None:
+    cache_file = thumbnail_cache_file(entry, source_url)
+    try:
+        return cache_file.read_bytes() if cache_file.exists() else None
+    except OSError:
+        return None
+
+
+def warm_thumbnail_async(entry: dict[str, Any]) -> None:
+    entry_id = str(entry.get("entry_id") or "").strip()
+    if not entry_id:
+        return
+    with THUMB_WARM_LOCK:
+        if entry_id in THUMB_WARMING:
+            return
+        THUMB_WARMING.add(entry_id)
+
+    def run() -> None:
+        try:
+            # Let the creator's direct image request win; warm the smaller WebP after it.
+            time.sleep(1.5)
+            with THUMB_WARM_SEMAPHORE:
+                optimized_thumbnail(entry)
+        except Exception:
+            pass
+        finally:
+            with THUMB_WARM_LOCK:
+                THUMB_WARMING.discard(entry_id)
+
+    threading.Thread(target=run, name=f"thumb-{entry_id[:8]}", daemon=True).start()
+
+
 def optimized_thumbnail(entry: dict[str, Any]) -> tuple[bytes, str]:
     entry_id = str(entry.get("entry_id") or "").strip()
     source_url = thumbnail_url(entry)
     if not entry_id or not source_url:
         return placeholder_svg(entry), "image/svg+xml; charset=utf-8"
-    digest = hashlib.sha1(source_url.encode("utf-8")).hexdigest()[:12]
-    cache_file = THUMB_IMAGE_CACHE_DIR / f"{entry_id}-{digest}.webp"
+    cache_file = thumbnail_cache_file(entry, source_url)
     if cache_file.exists():
         return cache_file.read_bytes(), "image/webp"
     raw, content_type = fetch_image_bytes(source_url)
@@ -2924,6 +3051,7 @@ def import_creator_profiles(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def invalidate_entry_cache(entry_id: str) -> None:
+    invalidate_library_snapshot()
     cache = read_json_file(THUMB_CACHE_FILE, {})
     if isinstance(cache, dict) and entry_id in cache:
         cache.pop(entry_id, None)
@@ -3202,7 +3330,7 @@ function masonryHtml(list){{if(!list.length)return `<section class="state card">
 function renderMasonry(sel,list){{document.querySelector(sel).innerHTML=masonryHtml(list)}}
 function renderAllScriptsFeed(){{const root=document.querySelector("#all-feed");if(!root)return;const more=entries.length<entriesTotal;root.innerHTML=masonryHtml(entries)+`<section class="all-scripts-load"><span>${{lang==="zh"?`已显示 ${{entries.length}} / ${{entriesTotal}} 条`:`${{entries.length}} de ${{entriesTotal}} roteiros`}}</span>${{more?`<button class="primary" type="button" data-all-load-more>${{lang==="zh"?"继续加载 50 条":"Carregar mais 50"}}</button>`:""}}</section>`}}
 async function loadMoreAllScripts(){{const button=document.querySelector("[data-all-load-more]");if(button){{button.disabled=true;button.textContent=lang==="zh"?"加载中...":"Carregando..."}}try{{await ensure(Math.min(entriesTotal||500,entries.length+50));renderAllScriptsFeed()}}catch(err){{if(button){{button.disabled=false;button.textContent=lang==="zh"?"重试":"Tentar novamente"}}}}}}
-function preloadImagesAround(index){{if(!entries.length)return;[0,1,2,3].forEach(offset=>{{const item=entries[(index+offset)%entries.length];const url=scriptImage(item);if(url){{const img=new Image();img.decoding="async";img.loading="eager";img.src=url;}}}})}}
+function preloadImagesAround(index){{if(!entries.length)return;const warm=()=>{{const item=entries[(index+1)%entries.length];const url=scriptImage(item);if(url){{const img=new Image();img.decoding="async";img.src=url;}}}};if("requestIdleCallback" in window)requestIdleCallback(warm,{{timeout:1800}});else setTimeout(warm,900)}}
 
 function featuredCard(e,i,total=10){{const tags=[ptTag(e.content_type),durationLabel(e)].filter(Boolean);const hasVideo=!!String(e.video_url||"").trim();const picked=missionState().picks.includes(e.entry_id);return `<section class="featured-shell"><div class="feature-context"><b>${{lang==="zh"?"今日脚本推荐":"Roteiro recomendado hoje"}}</b><span>${{i+1}}/${{total}}</span></div><div class="featured-card-wrap"><article class="featured-card" data-feature-card="${{esc(e.entry_id)}}"><div class="featured-scroll-area"><div class="featured-media" data-feature-media="${{esc(e.entry_id)}}" data-original-video="${{esc(e.video_url||"")}}"><img src="${{esc(scriptImage(e))}}" loading="eager" alt=""><div class="featured-video-shell" data-feature-video-shell></div>${{hasVideo?`<button class="featured-play" type="button" data-feature-play="${{esc(e.entry_id)}}" aria-label="${{lang==="zh"?"播放参考视频":"Reproduzir referencia"}}"><span>▶</span></button>`:""}}</div><div class="featured-body"><h2 class="featured-title">${{esc(ptTitle(e))}}</h2><div class="featured-tags">${{tags.map(x=>`<span class="tag">${{esc(x)}}</span>`).join("")}}</div><div class="script-expand-cue"><button class="scroll-cue" type="button" data-scroll-script="${{esc(e.entry_id)}}" aria-label="${{lang==="zh"?"点击展开查看脚本细节":"Toque para ver detalhes do roteiro"}}">⌄</button><span>${{lang==="zh"?"点击展开查看脚本细节":"Toque para ver detalhes do roteiro"}}</span></div>${{inlineScriptShell(e)}}</div></div>${{preferenceStripHtml()}}<div class="featured-actions pick-actions"><button class="pick-skip" type="button" data-feature-skip><span class="pick-mark">✕</span><span>${{lang==="zh"?"不想拍摄":"Não quero gravar"}}</span></button><button class="pick-plan ${{picked?"is-picked":""}}" type="button" data-plan-script="${{esc(e.entry_id)}}"><span class="pick-mark">✓</span><span>${{lang==="zh"?"我要拍摄":"Quero gravar"}}</span></button></div></article></div></section>`}}
 function stopFeaturedVideo(){{document.querySelectorAll("[data-feature-media]").forEach(media=>{{media.classList.remove("playing","loading");media.querySelectorAll("video").forEach(v=>{{try{{v.pause();v.removeAttribute("src");v.load()}}catch(e){{}}}});const shell=media.querySelector("[data-feature-video-shell]");if(shell)shell.innerHTML="";media.querySelector(".featured-video-loading")?.remove();media.querySelector(".featured-video-error")?.remove();}})}}
@@ -3261,9 +3389,10 @@ function preferenceStripHtml(){{const summary=chips();const empty=`<span class="
 function addToTodayPlan(id){{const state=missionState();if(!state.picks.includes(id)){{state.picks.push(id)}}if(!ids("planned").has(id)){{["saved","planned","finished","rejected"].forEach(k=>workspace[k]=(workspace[k]||[]).filter(x=>x!==id));workspace.planned=[...(workspace.planned||[]),id]}}saveWorkspace();return true}}
 function rewardBanner(){{const weeklyDone=Math.min(15,missionWeeklyDone());const pct=Math.min(100,Math.round(weeklyDone/15*100));const complete=weeklyDone>=15;const rewards=[3,6,9,12,15];const giftLabel=lang==="zh"?"神秘礼物":"presente";const ticks=Array.from({{length:15}},(_,i)=>`<span class="reward-tick ${{weeklyDone>=i+1?"done":""}}"></span>`).join("");const coins=rewards.map(n=>`<div class="reward-step ${{weeklyDone>=n?"done":""}}" style="left:${{Math.round(n/15*100)}}%"><span class="reward-amount">${{n}} USD</span><span class="reward-coin" aria-hidden="true"></span>${{n===6||n===12?`<span class="reward-gift" title="${{giftLabel}}" aria-label="${{giftLabel}}"></span>`:""}}</div>`).join("");return `<section class="reward-card ${{complete?"complete":""}}"><div class="reward-glow"></div><img class="reward-logo" src="/static/kwai-favicon.svg" alt="Kwai"><div class="reward-copy"><h2>${{complete?(lang==="zh"?"本周任务已完成":"Meta semanal concluída"):(lang==="zh"?"完成翻拍赚取现金奖励":"Ganhe bônus gravando roteiros")}}</h2><p>${{complete?(lang==="zh"?"想解锁下一周任务，可以点击申请联系我们。":"Para liberar a próxima semana, toque para solicitar contato."):(lang==="zh"?"每完成 3 条审核通过的视频，就解锁一个奖金节点，还有神秘礼物。":"A cada 3 vídeos aprovados, você libera bônus em dinheiro e presentes surpresa.")}}</p></div><div class="reward-track"><i style="width:${{pct}}%"></i><div class="reward-ticks">${{ticks}}</div><div class="reward-steps">${{coins}}</div><span class="reward-progress-tail">${{weeklyDone}}/15</span></div>${{complete?`<button class="reward-apply" type="button" data-week-apply>${{lang==="zh"?"申请解锁下一周任务":"Solicitar próxima semana"}}</button>`:""}}</section>`}}
 function refreshRewardBanner(){{const old=document.querySelector(".reward-card");if(old)old.outerHTML=rewardBanner()}}
-function renderFeaturedAndPlan(){{const key=recommendationKey();if(featuredKey!==key){{featuredKey=key;featuredOffset=0}}const candidates=todayCandidates();const slot=document.querySelector("#featured-slot");const plan=document.querySelector("#today-plan-slot");if(!slot||!plan)return;if(!candidates.length){{slot.innerHTML="";plan.innerHTML=todayPlanHtml();return}}if(selectionRoundComplete(candidates)){{slot.innerHTML=allScriptsPanel();plan.innerHTML=todayPlanHtml();return}}const idx=currentFeaturedIndex(candidates);const item=candidates[idx];preloadImagesAround(idx);slot.innerHTML=featuredCard(item,idx,candidates.length);plan.innerHTML=todayPlanHtml();loadInlineScript(item)}}
+function renderFeaturedAndPlan(){{const key=recommendationKey();if(featuredKey!==key){{featuredKey=key;featuredOffset=0}}const candidates=todayCandidates();const slot=document.querySelector("#featured-slot");const plan=document.querySelector("#today-plan-slot");if(!slot||!plan)return;if(!candidates.length){{slot.innerHTML="";plan.innerHTML=todayPlanHtml();return}}if(selectionRoundComplete(candidates)){{slot.innerHTML=allScriptsPanel();plan.innerHTML=todayPlanHtml();return}}const idx=currentFeaturedIndex(candidates);const item=candidates[idx];slot.innerHTML=featuredCard(item,idx,candidates.length);plan.innerHTML=todayPlanHtml();preloadImagesAround(idx)}}
 function inlineScriptShell(e){{return `<section class="inline-script-section" id="inline-script-${{esc(e.entry_id)}}"><h2>${{lang==="zh"?"具体脚本":"Roteiro detalhado"}}</h2><div id="inline-script-slot-${{esc(e.entry_id)}}">${{scriptLoading()}}</div></section>`}}
 async function loadInlineScript(e){{const slot=document.querySelector(`#inline-script-slot-${{CSS.escape(e.entry_id)}}`);if(!slot)return;try{{const html=e.script_html||await fetchScriptHtml(e.entry_id);slot.innerHTML=renderScriptSlot(html,e)}}catch(err){{slot.innerHTML=renderScriptSlot("",{{...e,summary:e.summary||err.message}})}}}}
+document.addEventListener("click",event=>{{const trigger=event.target.closest("[data-scroll-script]");if(!trigger||!trigger.closest("[data-feature-card]"))return;const item=entry(trigger.dataset.scrollScript);if(item)loadInlineScript(item)}},true)
 function planCard(e){{const done=missionDone(e.entry_id);const sub=submissionFor(e.entry_id);return `<article class="plan-card plan-card-compact ${{done?"done":""}}"><div class="plan-card-top"><img src="${{esc(scriptImage(e))}}" loading="lazy" alt=""><h3>${{esc(ptTitle(e))}}</h3></div><button class="plan-detail-button" type="button" data-scroll-script="${{esc(e.entry_id)}}">${{lang==="zh"?"点击查看脚本详情":"Ver detalhes do roteiro"}}</button><div class="plan-submit-row plan-submit-row-compact"><input type="url" data-submit-url="${{esc(e.entry_id)}}" placeholder="${{lang==="zh"?"在这里粘贴拍摄好的视频链接":"Cole aqui o link do vídeo gravado"}}"><button class="primary" type="button" data-submit="${{esc(e.entry_id)}}">${{lang==="zh"?"确认上传":"Confirmar"}}</button></div><div class="plan-status" id="submit-status-${{esc(e.entry_id)}}">${{done?(lang==="zh"?"✅ 脚本已上传，等待审核":"✅ Vídeo enviado, aguardando revisão"):(sub?esc(submissionTime(sub)):"")}}</div></article>`}}
 function todayPlanHtml(){{const picks=missionPickedEntries();const done=picks.filter(e=>missionDone(e.entry_id)).length;const total=Math.max(1,picks.length);const pct=picks.length?Math.min(100,Math.round(done/total*100)):0;const progressText=picks.length?`${{done}}/${{picks.length}}`:"0/0";const list=picks.length?picks.map(planCard).join(""):`<section class="plan-empty"><b>${{lang==="zh"?"先选择今天要拍的脚本":"Escolha os roteiros de hoje"}}</b><span>${{lang==="zh"?"从上方推荐卡片里选择脚本，加入后这里会变成你的拍摄计划和回传入口。":"Toque em Adicionar ao plano nos cards acima. Eles aparecem aqui com o campo para enviar o vídeo."}}</span></section>`;return `<section class="today-plan" id="today-plan"><div class="today-plan-head"><h2>${{lang==="zh"?"今日拍摄计划":"Plano de gravação de hoje"}}</h2><div class="plan-progress-row"><span class="today-plan-progress">${{lang==="zh"?"已完成":"Concluído"}}: ${{progressText}}</span><div class="plan-progress-track"><i style="width:${{pct}}%"></i></div></div></div><div class="plan-list">${{list}}</div></section>`}}
 
@@ -3679,11 +3808,21 @@ class Handler(BaseHTTPRequestHandler):
             if not entry:
                 self.send_error(404)
                 return
-            raw, content_type = optimized_thumbnail(entry)
+            source_url = thumbnail_url(entry)
+            cached = cached_optimized_thumbnail(entry, source_url) if source_url else None
+            if cached is None and source_url:
+                warm_thumbnail_async(entry)
+                self.send_response(302)
+                self.send_header("Location", source_url)
+                self.send_header("Cache-Control", "public, max-age=300")
+                self.end_headers()
+                return
+            raw = cached if cached is not None else placeholder_svg(entry)
+            content_type = "image/webp" if cached is not None else "image/svg+xml; charset=utf-8"
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Cache-Control", "public, max-age=604800, immutable")
+            self.send_header("Cache-Control", "public, max-age=604800, immutable" if cached is not None else "public, max-age=300")
             self.end_headers()
             self.wfile.write(raw)
             return
