@@ -2314,7 +2314,7 @@ def script_title_for_id(entry_id: str) -> str:
 
 
 def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
-    """Return the three dashboard counters without building analytics details."""
+    """Return compact dashboard counters and daily account usage aggregates."""
     days = max(1, min(180, int(days or 180)))
     accounts = [item for item in load_accounts() if isinstance(item, dict)]
     alias_lookup = account_alias_lookup(accounts)
@@ -2332,16 +2332,38 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
             visitor_accounts[visitor_id] = account
 
     script_opens = 0
+    raw_script_opens = 0
+    active_account_ids: set[int] = set()
+    unique_script_ids: set[str] = set()
+    daily_people: dict[str, dict[int, dict[str, str]]] = {}
+    daily_script_opens: dict[str, int] = {}
+    daily_scripts: dict[str, set[str]] = {}
     for event in events:
         if str(event.get("event") or "") not in {"script_open", "detail_open"}:
             continue
-        if not str(event.get("script_id") or "").strip():
+        script_id = str(event.get("script_id") or "").strip()
+        if not script_id:
             continue
+        raw_script_opens += 1
         account = find_account_from_lookup(str(event.get("account_id") or ""), alias_lookup)
         if not account:
             account = visitor_accounts.get(str(event.get("visitor_id") or "").strip())
         if account and id(account) not in test_accounts:
             script_opens += 1
+            active_account_ids.add(id(account))
+            unique_script_ids.add(script_id)
+            created = parse_iso_time(event.get("created_at"))
+            day = created.date().isoformat() if created else str(event.get("created_at") or "")[:10]
+            if day:
+                account_id = str(account.get("account_id") or account.get("phone") or "").strip()
+                daily_people.setdefault(day, {})[id(account)] = {
+                    "account_id": account_id,
+                    "display_name": str(account.get("display_name") or account_id or "创作者"),
+                    "phone": str(account.get("phone") or ""),
+                    "kwai_id": str(account.get("kwai_id") or ""),
+                }
+                daily_script_opens[day] = daily_script_opens.get(day, 0) + 1
+                daily_scripts.setdefault(day, set()).add(script_id)
 
     matched_submission_accounts: set[int] = set()
     submission_count = 0
@@ -2372,8 +2394,21 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
         "summary": {
             "registered_users": registered_users,
             "script_opens": script_opens,
+            "raw_script_opens": raw_script_opens,
+            "active_users": len(active_account_ids),
+            "unique_scripts_opened": len(unique_script_ids),
             "submissions": submission_count,
         },
+        "daily_usage": [
+            {
+                "day": day,
+                "active_users": len(daily_people.get(day, {})),
+                "script_opens": daily_script_opens.get(day, 0),
+                "unique_scripts_opened": len(daily_scripts.get(day, set())),
+                "people": list(daily_people.get(day, {}).values()),
+            }
+            for day in sorted(daily_people, reverse=True)
+        ],
     }
 
 
