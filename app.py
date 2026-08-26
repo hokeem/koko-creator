@@ -1989,6 +1989,50 @@ def public_account(account: dict[str, Any], *, include_state: bool = False) -> d
     return payload
 
 
+def public_accounts_compact() -> list[dict[str, Any]]:
+    """Return the identity fields needed by Creator Ops without workspace blobs."""
+    submissions = read_json_file(SUBMISSIONS_FILE, [])
+    if not isinstance(submissions, list):
+        submissions = []
+    submission_counts: dict[str, int] = {}
+    for item in submissions:
+        if not isinstance(item, dict):
+            continue
+        key = normalize_account_key(str(item.get("creator_id") or ""))
+        if key:
+            submission_counts[key] = submission_counts.get(key, 0) + 1
+
+    rows: list[dict[str, Any]] = []
+    for account in load_accounts():
+        account_id = str(account.get("account_id") or "").strip()
+        state = account.get("state") if isinstance(account.get("state"), dict) else {}
+        workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
+        schedule = workspace.get("schedule") if isinstance(workspace.get("schedule"), dict) else {}
+        aliases = sorted(account_aliases(account))
+        rows.append({
+            "account_id": account_id,
+            "phone": str(account.get("phone") or account_id),
+            "kwai_id": str(account.get("kwai_id") or ""),
+            "uid": str(account.get("uid") or ""),
+            "login_aliases": aliases,
+            "display_name": str(account.get("display_name") or account_id),
+            "status": str(account.get("status") or "active"),
+            "source": str(account.get("source") or ""),
+            "registration_status": str(account.get("registration_status") or "unregistered"),
+            "created_at": str(account.get("created_at") or ""),
+            "provisioned_at": str(account.get("provisioned_at") or ""),
+            "registered_at": str(account.get("registered_at") or ""),
+            "last_registered_at": str(account.get("last_registered_at") or ""),
+            "updated_at": str(account.get("updated_at") or ""),
+            "last_login_at": str(account.get("last_login_at") or ""),
+            "saved_count": len(workspace.get("saved") or []),
+            "scheduled_count": sum(len(value) for value in schedule.values() if isinstance(value, list)),
+            "submission_count": sum(submission_counts.get(alias, 0) for alias in aliases),
+            "submissions": [],
+        })
+    return rows
+
+
 def find_account(account_id: str) -> dict[str, Any] | None:
     target = canonical_account_key(account_id)
     phone_target = canonical_account_key(normalize_phone(account_id))
@@ -3870,7 +3914,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/admin/accounts":
             if not self.require_admin():
                 return
-            accounts = [public_account(item, include_state=True) for item in load_accounts()]
+            q = urllib.parse.parse_qs(parsed.query)
+            compact = (q.get("compact") or ["0"])[0] == "1"
+            accounts = public_accounts_compact() if compact else [public_account(item, include_state=True) for item in load_accounts()]
             self.send_json({"ok": True, "accounts": accounts, "total": len(accounts)})
             return
         if parsed.path == "/api/me/state":
