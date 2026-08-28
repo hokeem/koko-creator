@@ -1956,10 +1956,9 @@ def save_accounts(accounts: list[dict[str, Any]]) -> None:
 
 def public_account(account: dict[str, Any], *, include_state: bool = False) -> dict[str, Any]:
     account_id = str(account.get("account_id") or "").strip()
-    aliases = account_aliases(account)
     submissions = [
         item for item in read_json_file(SUBMISSIONS_FILE, [])
-        if isinstance(item, dict) and normalize_account_key(str(item.get("creator_id") or "")) in aliases
+        if isinstance(item, dict) and submission_matches_account(item, account)
     ]
     state = account.get("state") if isinstance(account.get("state"), dict) else {}
     workspace = state.get("workspace") if isinstance(state, dict) and isinstance(state.get("workspace"), dict) else {}
@@ -3999,8 +3998,10 @@ class Handler(BaseHTTPRequestHandler):
             submissions = read_json_file(SUBMISSIONS_FILE, [])
             if not isinstance(submissions, list):
                 submissions = []
-            account_id = str(account.get("account_id") or "")
-            submissions = [item for item in submissions if isinstance(item, dict) and str(item.get("creator_id") or "") == account_id]
+            submissions = [
+                item for item in submissions
+                if isinstance(item, dict) and submission_matches_account(item, account)
+            ]
             self.send_json({"submissions": submissions})
             return
         if parsed.path == "/api/creator/sync-status":
