@@ -197,6 +197,23 @@ def apply_entry_override(entry: dict[str, Any], override: dict[str, Any] | None)
         "library_date",
         "created_at",
         "saved_at",
+        "relationship_tags",
+        "format_tags",
+        "location_tags",
+        "content_tags",
+        "relationship_tag_labels_zh",
+        "relationship_tag_labels_pt",
+        "format_tag_labels_zh",
+        "format_tag_labels_pt",
+        "location_tag_labels_zh",
+        "location_tag_labels_pt",
+        "content_tag_labels_zh",
+        "content_tag_labels_pt",
+        "taxonomy_version",
+        "taxonomy_source",
+        "taxonomy_confidence",
+        "taxonomy_reasoning",
+        "taxonomy_updated_at",
     ]:
         if key in override:
             item[key] = override.get(key)
@@ -441,6 +458,10 @@ def normalized_entry(entry: dict[str, Any]) -> dict[str, Any]:
     if seconds > 0:
         item["duration_seconds"] = round(seconds, 2)
         item["duration_bucket"] = duration_bucket_from_seconds(seconds)
+    for dimension in ["relationship", "format", "location", "content"]:
+        field = f"{dimension}_tags"
+        values = item.get(field)
+        item[field] = list(dict.fromkeys(str(value).strip() for value in values if str(value).strip())) if isinstance(values, list) else []
     return item
 
 
@@ -635,6 +656,16 @@ def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         "library_date": str(entry.get("library_date") or entry.get("saved_at") or entry.get("created_at") or "")[:10],
         "source": "creator_direct_import",
     }
+    for dimension in ["relationship", "format", "location", "content"]:
+        field = f"{dimension}_tags"
+        labels_zh = f"{dimension}_tag_labels_zh"
+        labels_pt = f"{dimension}_tag_labels_pt"
+        imported[field] = list(entry.get(field) or [])
+        imported[labels_zh] = list(entry.get(labels_zh) or [])
+        imported[labels_pt] = list(entry.get(labels_pt) or [])
+    for field in ["taxonomy_version", "taxonomy_source", "taxonomy_confidence", "taxonomy_reasoning", "taxonomy_updated_at"]:
+        if field in entry:
+            imported[field] = entry.get(field)
     imported = normalized_entry(imported)
     upsert_manual_entry(imported)
     invalidate_entry_cache(entry_id)
@@ -1006,7 +1037,7 @@ def public_entry(entry: dict[str, Any], score: int) -> dict[str, Any]:
     script_date = str(entry.get("saved_at") or entry.get("created_at") or "").strip()
     duration_bucket = duration_bucket_for_entry(entry)
     duration_seconds = entry_duration_seconds(entry)
-    return {
+    result = {
         "entry_id": entry_id,
         "title": entry.get("title") or "Roteiro",
         "summary": entry_summary(entry),
@@ -1025,6 +1056,12 @@ def public_entry(entry: dict[str, Any], score: int) -> dict[str, Any]:
         "duration_label_zh": DURATION_LABELS.get(duration_bucket, {}).get("zh", ""),
         "score": score,
     }
+    for dimension in ["relationship", "format", "location", "content"]:
+        result[f"{dimension}_tags"] = list(entry.get(f"{dimension}_tags") or [])
+        result[f"{dimension}_tag_labels_zh"] = list(entry.get(f"{dimension}_tag_labels_zh") or [])
+        result[f"{dimension}_tag_labels_pt"] = list(entry.get(f"{dimension}_tag_labels_pt") or [])
+    result["taxonomy_version"] = str(entry.get("taxonomy_version") or "")
+    return result
 
 
 def rewrite_relative_urls(html_text: str, base_url: str) -> str:
@@ -2775,7 +2812,7 @@ def public_admin_entry(entry: dict[str, Any]) -> dict[str, Any]:
     manual_tags = entry.get("manual_tags") if isinstance(entry.get("manual_tags"), dict) else {}
     duration_bucket = duration_bucket_for_entry(entry)
     duration_seconds = entry_duration_seconds(entry)
-    return {
+    result = {
         "entry_id": entry_id,
         "title": str(entry.get("title") or ""),
         "summary": entry_summary(entry),
@@ -2797,6 +2834,14 @@ def public_admin_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "published": bool(entry.get("creator_published", True)),
         "overridden": bool(entry.get("creator_override")),
     }
+    for dimension in ["relationship", "format", "location", "content"]:
+        result[f"{dimension}_tags"] = list(entry.get(f"{dimension}_tags") or [])
+        result[f"{dimension}_tag_labels_zh"] = list(entry.get(f"{dimension}_tag_labels_zh") or [])
+        result[f"{dimension}_tag_labels_pt"] = list(entry.get(f"{dimension}_tag_labels_pt") or [])
+    result["taxonomy_version"] = str(entry.get("taxonomy_version") or "")
+    result["taxonomy_source"] = str(entry.get("taxonomy_source") or "")
+    result["taxonomy_confidence"] = str(entry.get("taxonomy_confidence") or "")
+    return result
 
 
 def normalize_kwai_url(url: str) -> str:
