@@ -526,6 +526,27 @@ def sync_library(force: bool = False) -> dict[str, Any]:
         return meta
 
 
+def sync_library_entry(entry_id: str) -> dict[str, Any]:
+    entry_id = str(entry_id or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", entry_id):
+        raise ValueError("invalid entry_id")
+    payload = json.loads(fetch_text(f"{SOURCE_URL.rstrip('/')}/{entry_id}", timeout=20))
+    entry = payload.get("entry") if isinstance(payload, dict) else None
+    if not isinstance(entry, dict) or str(entry.get("entry_id") or "") != entry_id:
+        raise ValueError("source entry was not found")
+    entries = read_json_file(LIBRARY_FILE, [])
+    entries = [item for item in entries if isinstance(item, dict)] if isinstance(entries, list) else []
+    replaced = False
+    for index, item in enumerate(entries):
+        if str(item.get("entry_id") or "") == entry_id:
+            entries[index] = entry
+            replaced = True
+            break
+    if not replaced:
+        entries.insert(0, entry)
+    write_json_atomic(LIBRARY_FILE, entries[:500])
+    invalidate_library_snapshot()
+    return {"ok": True, "status": "updated" if replaced else "inserted", "entry_id": entry_id}
 def maybe_sync_library() -> None:
     """Refresh in the background so a creator never waits for the source service."""
     global LAST_SYNC_CHECK_MONOTONIC, SYNC_IN_PROGRESS
@@ -4348,6 +4369,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/creator/sync-library":
             self.send_json(sync_library(True))
+            return
+        if parsed.path == "/api/creator/sync-entry":
+            try:
+                payload = self.read_body()
+                self.send_json(sync_library_entry(str(payload.get("entry_id") or "")))
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=400)
             return
         self.send_error(404)
 
