@@ -20,6 +20,7 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -2282,19 +2283,22 @@ def visitor_cookie_header(visitor_id: str) -> tuple[str, str]:
 def record_site_open(headers: Any, path: str, *, account: dict[str, Any] | None = None, script_id: str = "", source: str = "server") -> str:
     visitor_id = analytics_visitor_id(headers)
     page_type = "script" if script_id else "portal"
-    append_analytics_event(
-        {"event": "site_open", "page_type": page_type, "script_id": script_id, "path": path, "meta": {"source": source}},
-        headers,
-        account=account,
-        visitor_id=visitor_id,
-    )
-    if script_id:
+    try:
         append_analytics_event(
-            {"event": "script_open", "page_type": "script", "script_id": script_id, "path": path, "meta": {"source": source}},
+            {"event": "site_open", "page_type": page_type, "script_id": script_id, "path": path, "meta": {"source": source}},
             headers,
             account=account,
             visitor_id=visitor_id,
         )
+        if script_id:
+            append_analytics_event(
+                {"event": "script_open", "page_type": "script", "script_id": script_id, "path": path, "meta": {"source": source}},
+                headers,
+                account=account,
+                visitor_id=visitor_id,
+            )
+    except Exception as exc:
+        print(f"analytics_record_failed path={path!r} error={exc}", flush=True)
     return visitor_id
 
 
@@ -3386,6 +3390,7 @@ document.addEventListener("click",e=>{{const edit=e.target.closest("[data-edit]"
 FAVICON_LINKS = """<link rel="icon" type="image/svg+xml" href="/favicon.svg?v=kwai1"><link rel="shortcut icon" href="/favicon.ico?v=kwai1">"""
 
 
+@lru_cache(maxsize=1)
 def page_html() -> str:
     questions_json = json.dumps(QUESTIONS, ensure_ascii=False)
     profile_override_css = """.profile-hero{min-height:0;margin:-22px -22px 14px;padding:12px 14px 16px;background:linear-gradient(135deg,#32180b,#ff5f00 64%,#ffb36f);overflow:visible}.profile-cover{inset:0;height:132px;border-radius:0;background:radial-gradient(circle at 72% 16%,#ff8a1c,#8a3205 50%,#2a160d);filter:none}.profile-cover:after{background:linear-gradient(180deg,#00000018,#00000042)}.profile-tools{position:relative;top:auto;right:auto;justify-content:flex-end;margin-bottom:44px}.profile-upload{min-height:30px;padding:0 11px;border-color:#ffffff70;background:#ffffff24;font-size:11px;white-space:nowrap}.profile-info{position:relative;margin-top:-12px;padding:14px;border-radius:24px;background:#fffffff2;color:#1f1f1f;box-shadow:0 18px 38px #552d0a24}.profile-row{align-items:center;gap:12px}.profile-avatar{width:78px;height:78px;flex:0 0 78px;border:4px solid #fff;box-shadow:0 10px 24px #552d0a22}.profile-name{margin:0 0 6px;color:#1f1f1f;font-size:25px;text-shadow:none}.profile-bio{color:#69707a;font-size:13px;line-height:1.42}.profile-stats{margin-top:14px;padding:11px 8px;border-radius:18px;background:#fff7f0;border:1px solid #ff5f0018;text-align:center}.profile-stats b{color:#1f1f1f;font-size:19px}.profile-stats span{color:#69707a;font-size:12px;font-weight:800}.profile-prefs{margin-top:12px;gap:7px}.profile-prefs .chip{padding:7px 10px;background:#fff;color:#ff5f00;border-color:#ff5f0045;box-shadow:none;font-size:11px}.profile-card-strip{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0 12px}.profile-mini{min-height:58px;border-radius:18px;background:#fff;border:1px solid #ff5f0016;box-shadow:0 8px 18px #552d0a10;font-size:11px}.profile-mini b{font-size:17px;margin-bottom:2px}.profile-tabs{top:64px;margin:0 -22px 10px;padding:8px 18px}.profile-tabs .tabs button{padding:8px 12px;font-size:12px}#saved-feed .state{margin:0;border-radius:24px;padding:26px 20px}@media(max-width:380px){.profile-upload{padding:0 8px;font-size:10px}.profile-avatar{width:68px;height:68px;flex-basis:68px}.profile-name{font-size:22px}.profile-info{padding:12px}.profile-tabs .tabs button{padding:8px 10px}}"""
@@ -4348,6 +4353,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in {"/", "/creator-portal"} or re.fullmatch(r"/script/[0-9a-f]{32}", parsed.path or ""):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        if parsed.path == "/healthz":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
         if parsed.path in {"/favicon.svg", "/favicon.ico", "/brand/kwai-favicon.svg"}:
             self.send_favicon(head_only=True)
             return
