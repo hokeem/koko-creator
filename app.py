@@ -495,6 +495,33 @@ def fetch_text(url: str, timeout: int = 20) -> str:
         return completed.stdout.decode("utf-8", errors="ignore")
 
 
+def reclaim_rebuildable_cache_space(min_free_bytes: int = 64 * 1024 * 1024) -> int:
+    """Remove oldest generated caches when the persistent disk is nearly full."""
+    try:
+        if shutil.disk_usage(DATA_ROOT).free >= min_free_bytes:
+            return 0
+    except OSError:
+        return 0
+    candidates: list[Path] = []
+    for root in (THUMB_IMAGE_CACHE_DIR, SCRIPT_HTML_CACHE_DIR):
+        if root.exists():
+            candidates.extend(path for path in root.rglob("*") if path.is_file())
+    candidates.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0)
+    removed = 0
+    for path in candidates:
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+        try:
+            if shutil.disk_usage(DATA_ROOT).free >= min_free_bytes:
+                break
+        except OSError:
+            break
+    return removed
+
+
 def sync_library(force: bool = False) -> dict[str, Any]:
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     meta = read_json_file(SYNC_META_FILE, {})
@@ -513,6 +540,7 @@ def sync_library(force: bool = False) -> dict[str, Any]:
         if not isinstance(entries, list):
             raise ValueError("source did not return a list")
         clean = [entry for entry in entries if isinstance(entry, dict)]
+        reclaim_rebuildable_cache_space()
         write_json_atomic(LIBRARY_FILE, clean)
         meta = {"ok": True, "status": "synced", "source_url": SOURCE_URL, "entries_count": len(clean), "last_synced_at": now_iso()}
         write_json_atomic(SYNC_META_FILE, meta)
@@ -544,6 +572,7 @@ def sync_library_entry(entry_id: str) -> dict[str, Any]:
             break
     if not replaced:
         entries.insert(0, entry)
+    reclaim_rebuildable_cache_space()
     write_json_atomic(LIBRARY_FILE, entries[:500])
     invalidate_library_snapshot()
     return {"ok": True, "status": "updated" if replaced else "inserted", "entry_id": entry_id}
