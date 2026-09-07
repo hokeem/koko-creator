@@ -4378,10 +4378,16 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    DATA_ROOT.mkdir(parents=True, exist_ok=True)
-    sync_library(False)
+    try:
+        DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        print(f"data_root_init_failed path={DATA_ROOT!s} error={exc}", flush=True)
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(json.dumps({"port": PORT, "data_root": str(DATA_ROOT)}, ensure_ascii=False), flush=True)
+    try:
+        maybe_sync_library()
+    except Exception as exc:
+        print(f"startup_sync_schedule_failed error={exc}", flush=True)
     server.serve_forever()
     return 0
 
