@@ -36,6 +36,16 @@ class CacheReclamationTests(unittest.TestCase):
             self.assertFalse(old.exists())
             self.assertTrue(new.exists())
 
+    def test_script_open_is_queued_without_sync_file_write(self) -> None:
+        headers = {"User-Agent": "test"}
+        script_id = "a" * 32
+        with patch.object(app, "enqueue_analytics_events") as enqueue:
+            visitor_id = app.record_site_open(headers, f"/script/{script_id}", script_id=script_id)
+
+        self.assertTrue(visitor_id)
+        events = enqueue.call_args.args[0]
+        self.assertEqual([event["event"] for event in events], ["site_open", "script_open"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ import hmac
 import json
 import mimetypes
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -101,6 +102,8 @@ THUMB_WARMING: set[str] = set()
 CACHE_RECLAIM_LOCK = threading.Lock()
 CACHE_MIN_FREE_BYTES = int(os.environ.get("CREATOR_CACHE_MIN_FREE_MB", "192")) * 1024 * 1024
 CACHE_MAX_BYTES = int(os.environ.get("CREATOR_CACHE_MAX_MB", "256")) * 1024 * 1024
+ANALYTICS_WRITE_LOCK = threading.Lock()
+ANALYTICS_EVENT_QUEUE: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=4096)
 
 
 QUESTIONS = [
@@ -2287,7 +2290,7 @@ def analytics_ip_hash(headers: Any) -> str:
     return hashlib.sha256((raw + ADMIN_PASSWORD).encode("utf-8")).hexdigest()[:16]
 
 
-def append_analytics_event(
+def build_analytics_event(
     payload: dict[str, Any],
     headers: Any,
     *,
@@ -2306,7 +2309,7 @@ def append_analytics_event(
         duration_ms = max(0, min(12 * 60 * 60 * 1000, int(float(payload.get("duration_ms") or 0))))
     except Exception:
         duration_ms = 0
-    event = {
+    return {
         "event_id": uuid4().hex,
         "event": event_name,
         "created_at": now_iso(),
@@ -2322,10 +2325,54 @@ def append_analytics_event(
         "user_agent": str(headers.get("User-Agent") or "")[:260],
         "ip_hash": analytics_ip_hash(headers),
     }
-    events = load_analytics_events()
-    events.append(event)
-    save_analytics_events(events)
+
+
+def persist_analytics_events(new_events: list[dict[str, Any]]) -> None:
+    if not new_events:
+        return
+    with ANALYTICS_WRITE_LOCK:
+        events = load_analytics_events()
+        events.extend(new_events)
+        save_analytics_events(events)
+
+
+def append_analytics_event(
+    payload: dict[str, Any],
+    headers: Any,
+    *,
+    account: dict[str, Any] | None = None,
+    visitor_id: str = "",
+) -> dict[str, Any]:
+    event = build_analytics_event(payload, headers, account=account, visitor_id=visitor_id)
+    persist_analytics_events([event])
     return event
+
+
+def enqueue_analytics_events(events: list[dict[str, Any]]) -> None:
+    for event in events:
+        try:
+            ANALYTICS_EVENT_QUEUE.put_nowait(event)
+        except queue.Full:
+            print("analytics_queue_full event_dropped=1", flush=True)
+
+
+def analytics_writer_loop() -> None:
+    while True:
+        first = ANALYTICS_EVENT_QUEUE.get()
+        batch = [first]
+        time.sleep(0.05)
+        while len(batch) < 100:
+            try:
+                batch.append(ANALYTICS_EVENT_QUEUE.get_nowait())
+            except queue.Empty:
+                break
+        try:
+            persist_analytics_events(batch)
+        except Exception as exc:
+            print(f"analytics_batch_write_failed count={len(batch)} error={exc}", flush=True)
+        finally:
+            for _ in batch:
+                ANALYTICS_EVENT_QUEUE.task_done()
 
 
 def script_id_from_url(value: object) -> str:
@@ -2354,19 +2401,16 @@ def record_site_open(headers: Any, path: str, *, account: dict[str, Any] | None 
     visitor_id = analytics_visitor_id(headers)
     page_type = "script" if script_id else "portal"
     try:
-        append_analytics_event(
+        events = [build_analytics_event(
             {"event": "site_open", "page_type": page_type, "script_id": script_id, "path": path, "meta": {"source": source}},
-            headers,
-            account=account,
-            visitor_id=visitor_id,
-        )
+            headers, account=account, visitor_id=visitor_id,
+        )]
         if script_id:
-            append_analytics_event(
+            events.append(build_analytics_event(
                 {"event": "script_open", "page_type": "script", "script_id": script_id, "path": path, "meta": {"source": source}},
-                headers,
-                account=account,
-                visitor_id=visitor_id,
-            )
+                headers, account=account, visitor_id=visitor_id,
+            ))
+        enqueue_analytics_events(events)
     except Exception as exc:
         print(f"analytics_record_failed path={path!r} error={exc}", flush=True)
     return visitor_id
@@ -4191,7 +4235,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 payload = {}
             visitor_id = analytics_visitor_id(self.headers)
-            event = append_analytics_event(payload, self.headers, visitor_id=visitor_id)
+            event = build_analytics_event(payload, self.headers, visitor_id=visitor_id)
+            enqueue_analytics_events([event])
             self.send_json(
                 {"ok": True, "event_id": event.get("event_id")},
                 status=201,
@@ -4478,6 +4523,7 @@ def main() -> int:
         print(f"data_root_init_failed path={DATA_ROOT!s} error={exc}", flush=True)
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(json.dumps({"port": PORT, "data_root": str(DATA_ROOT)}, ensure_ascii=False), flush=True)
+    threading.Thread(target=analytics_writer_loop, name="creator-analytics-writer", daemon=True).start()
 
     def startup_maintenance() -> None:
         try:
