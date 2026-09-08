@@ -98,6 +98,9 @@ SYNC_IN_PROGRESS = False
 THUMB_WARM_LOCK = threading.Lock()
 THUMB_WARM_SEMAPHORE = threading.Semaphore(2)
 THUMB_WARMING: set[str] = set()
+CACHE_RECLAIM_LOCK = threading.Lock()
+CACHE_MIN_FREE_BYTES = int(os.environ.get("CREATOR_CACHE_MIN_FREE_MB", "192")) * 1024 * 1024
+CACHE_MAX_BYTES = int(os.environ.get("CREATOR_CACHE_MAX_MB", "256")) * 1024 * 1024
 
 
 QUESTIONS = [
@@ -495,31 +498,45 @@ def fetch_text(url: str, timeout: int = 20) -> str:
         return completed.stdout.decode("utf-8", errors="ignore")
 
 
-def reclaim_rebuildable_cache_space(min_free_bytes: int = 64 * 1024 * 1024) -> int:
-    """Remove oldest generated caches when the persistent disk is nearly full."""
-    try:
-        if shutil.disk_usage(DATA_ROOT).free >= min_free_bytes:
-            return 0
-    except OSError:
+def reclaim_rebuildable_cache_space(
+    min_free_bytes: int = CACHE_MIN_FREE_BYTES,
+    max_cache_bytes: int = CACHE_MAX_BYTES,
+) -> int:
+    """Bound generated caches and preserve enough disk for durable creator data."""
+    if not CACHE_RECLAIM_LOCK.acquire(blocking=False):
         return 0
-    candidates: list[Path] = []
-    for root in (THUMB_IMAGE_CACHE_DIR, SCRIPT_HTML_CACHE_DIR):
-        if root.exists():
-            candidates.extend(path for path in root.rglob("*") if path.is_file())
-    candidates.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0)
-    removed = 0
-    for path in candidates:
+    try:
+        candidates: list[tuple[float, int, Path]] = []
+        for root in (THUMB_IMAGE_CACHE_DIR, SCRIPT_HTML_CACHE_DIR):
+            if not root.exists():
+                continue
+            for path in root.rglob("*"):
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                if path.is_file():
+                    candidates.append((stat.st_mtime, stat.st_size, path))
+        candidates.sort(key=lambda item: item[0])
+        cache_bytes = sum(item[1] for item in candidates)
         try:
-            path.unlink()
-            removed += 1
+            free_bytes = shutil.disk_usage(DATA_ROOT).free
         except OSError:
-            continue
-        try:
-            if shutil.disk_usage(DATA_ROOT).free >= min_free_bytes:
+            free_bytes = min_free_bytes
+        removed = 0
+        for _, size, path in candidates:
+            if free_bytes >= min_free_bytes and cache_bytes <= max_cache_bytes:
                 break
-        except OSError:
-            break
-    return removed
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+            cache_bytes = max(0, cache_bytes - size)
+            free_bytes += size
+        return removed
+    finally:
+        CACHE_RECLAIM_LOCK.release()
 
 
 def sync_library(force: bool = False) -> dict[str, Any]:
@@ -1174,11 +1191,13 @@ def script_html_for_entry(entry: dict[str, Any]) -> str:
     local_static = local_static_file_from_url(url)
     if local_static:
         clean = sanitize_script_html(local_static.read_text("utf-8", errors="ignore"), url)
+        reclaim_rebuildable_cache_space()
         SCRIPT_HTML_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         cache_file.write_text(clean, "utf-8")
         return clean
     raw = fetch_text(url, timeout=25)
     clean = sanitize_script_html(raw, url)
+    reclaim_rebuildable_cache_space()
     SCRIPT_HTML_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_file.write_text(clean, "utf-8")
     return clean
@@ -1394,6 +1413,7 @@ def optimized_thumbnail(entry: dict[str, Any]) -> tuple[bytes, str]:
         image.thumbnail((720, 720), Image.Resampling.LANCZOS)
         if image.mode not in {"RGB", "RGBA"}:
             image = image.convert("RGB")
+        reclaim_rebuildable_cache_space()
         THUMB_IMAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         out = BytesIO()
         image.save(out, format="WEBP", quality=76, method=5)
@@ -4458,10 +4478,20 @@ def main() -> int:
         print(f"data_root_init_failed path={DATA_ROOT!s} error={exc}", flush=True)
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(json.dumps({"port": PORT, "data_root": str(DATA_ROOT)}, ensure_ascii=False), flush=True)
-    try:
-        maybe_sync_library()
-    except Exception as exc:
-        print(f"startup_sync_schedule_failed error={exc}", flush=True)
+
+    def startup_maintenance() -> None:
+        try:
+            removed = reclaim_rebuildable_cache_space()
+            if removed:
+                print(f"startup_cache_reclaimed files={removed}", flush=True)
+        except Exception as exc:
+            print(f"startup_cache_reclaim_failed error={exc}", flush=True)
+        try:
+            maybe_sync_library()
+        except Exception as exc:
+            print(f"startup_sync_schedule_failed error={exc}", flush=True)
+
+    threading.Thread(target=startup_maintenance, name="creator-startup-maintenance", daemon=True).start()
     server.serve_forever()
     return 0
 
