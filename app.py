@@ -643,6 +643,111 @@ def prune_analytics_events(
         return {"before": original, "after": len(kept), "removed": max(0, original - len(kept))}
 
 
+def replace_asset_url_value(value: Any, replacements: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        text = value
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        return text
+    if isinstance(value, list):
+        return [replace_asset_url_value(item, replacements) for item in value]
+    if isinstance(value, dict):
+        return {key: replace_asset_url_value(item, replacements) for key, item in value.items()}
+    return value
+
+
+def optimize_manual_script_assets(
+    *,
+    min_size_bytes: int = 512 * 1024,
+    max_dimension: int = 960,
+    quality: int = 76,
+) -> dict[str, Any]:
+    if Image is None or not MANUAL_SCRIPT_ASSET_DIR.exists():
+        return {"optimized": 0, "removed_originals": 0, "freed_bytes": 0, "skipped": "pillow_unavailable_or_missing_dir"}
+    optimized = 0
+    removed_originals = 0
+    freed_bytes = 0
+    replacements: dict[str, str] = {}
+    for path in sorted(MANUAL_SCRIPT_ASSET_DIR.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            continue
+        try:
+            original_size = path.stat().st_size
+        except OSError:
+            continue
+        if original_size < min_size_bytes:
+            continue
+        entry_id = path.parent.name
+        if not re.fullmatch(r"[0-9a-f]{32}", entry_id):
+            continue
+        target = path.with_suffix(".webp")
+        tmp = target.with_name(f"{target.name}.{os.getpid()}.{uuid4().hex}.tmp")
+        try:
+            with Image.open(path) as image:
+                image = image.copy()
+                if max(image.size or (0, 0)) > max_dimension:
+                    image.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+                if image.mode not in {"RGB", "L"}:
+                    background = Image.new("RGB", image.size, (255, 255, 255))
+                    alpha = image.getchannel("A") if "A" in image.getbands() else None
+                    background.paste(image.convert("RGBA"), mask=alpha)
+                    image = background
+                else:
+                    image = image.convert("RGB")
+                tmp.parent.mkdir(parents=True, exist_ok=True)
+                image.save(tmp, "WEBP", quality=quality, method=6)
+            new_size = tmp.stat().st_size
+            if new_size >= original_size:
+                tmp.unlink(missing_ok=True)
+                continue
+            tmp.replace(target)
+            if path != target:
+                path.unlink(missing_ok=True)
+                removed_originals += 1
+            saved = max(0, original_size - new_size)
+            freed_bytes += saved
+            optimized += 1
+            old_rel = f"/manual_scripts/{entry_id}/{path.name}"
+            new_rel = f"/manual_scripts/{entry_id}/{target.name}"
+            replacements[old_rel] = new_rel
+            replacements[f"{PUBLIC_BASE_URL}{old_rel}"] = f"{PUBLIC_BASE_URL}{new_rel}"
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            continue
+    if replacements:
+        for json_path in (MANUAL_LIBRARY_FILE, LIBRARY_FILE):
+            data = read_json_file(json_path, None)
+            if data is not None:
+                updated = replace_asset_url_value(data, replacements)
+                if updated != data:
+                    try:
+                        write_json_atomic(json_path, updated)
+                    except OSError:
+                        json_path.write_text(json.dumps(updated, ensure_ascii=False), "utf-8")
+        for text_path in MANUAL_SCRIPT_ASSET_DIR.rglob("*"):
+            if not text_path.is_file() or text_path.suffix.lower() not in {".html", ".json"}:
+                continue
+            try:
+                text = text_path.read_text("utf-8")
+            except Exception:
+                continue
+            updated_text = text
+            for old, new in replacements.items():
+                updated_text = updated_text.replace(old, new)
+            if updated_text != text:
+                text_path.write_text(updated_text, "utf-8")
+        invalidate_library_snapshot()
+    return {
+        "optimized": optimized,
+        "removed_originals": removed_originals,
+        "freed_bytes": freed_bytes,
+        "freed_mb": round(freed_bytes / 1024 / 1024, 3),
+    }
+
+
 def force_creator_storage_cleanup(*, aggressive: bool = False) -> dict[str, Any]:
     before = data_disk_report()
     valid_ids = {str(entry.get("entry_id") or "") for entry in load_entries_raw_files()}
@@ -654,6 +759,7 @@ def force_creator_storage_cleanup(*, aggressive: bool = False) -> dict[str, Any]
     removed_thumb_cache = prune_mapping_cache(THUMB_CACHE_FILE, valid_ids)
     removed_video_cache = prune_mapping_cache(VIDEO_SOURCE_CACHE_FILE, valid_ids)
     analytics = prune_analytics_events()
+    manual_assets = optimize_manual_script_assets() if aggressive else {"optimized": 0, "removed_originals": 0, "freed_bytes": 0, "freed_mb": 0}
     after = data_disk_report()
     return {
         "ok": True,
@@ -664,6 +770,7 @@ def force_creator_storage_cleanup(*, aggressive: bool = False) -> dict[str, Any]
         "removed_thumbnail_cache_rows": removed_thumb_cache,
         "removed_video_source_cache_rows": removed_video_cache,
         "analytics": analytics,
+        "manual_assets": manual_assets,
     }
 
 

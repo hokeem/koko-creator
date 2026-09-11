@@ -97,6 +97,41 @@ class CacheReclamationTests(unittest.TestCase):
             self.assertEqual(result["removed"], 1)
             self.assertEqual([event["event_id"] for event in kept], ["recent"])
 
+    def test_manual_asset_optimizer_rewrites_library_urls(self) -> None:
+        if app.Image is None:
+            self.skipTest("Pillow is not installed")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            assets = root / "manual_scripts"
+            entry_id = "a" * 32
+            entry_dir = assets / entry_id
+            entry_dir.mkdir(parents=True)
+            image_path = entry_dir / "storyboard_cover.png"
+            app.Image.new("RGB", (1200, 1200), (255, 190, 80)).save(image_path, "PNG")
+            library_path = root / "manual_creator_scripts.json"
+            library_path.write_text(
+                app.json.dumps([{
+                    "entry_id": entry_id,
+                    "preview_image_url": f"https://kokocomedy.com/manual_scripts/{entry_id}/storyboard_cover.png",
+                }]),
+                "utf-8",
+            )
+
+            with (
+                patch.object(app, "MANUAL_SCRIPT_ASSET_DIR", assets),
+                patch.object(app, "MANUAL_LIBRARY_FILE", library_path),
+                patch.object(app, "LIBRARY_FILE", root / "creator_online_library.json"),
+                patch.object(app, "PUBLIC_BASE_URL", "https://kokocomedy.com"),
+                patch.object(app, "invalidate_library_snapshot"),
+            ):
+                result = app.optimize_manual_script_assets(min_size_bytes=1, max_dimension=300, quality=60)
+                updated = app.json.loads(library_path.read_text("utf-8"))
+
+            self.assertEqual(result["optimized"], 1)
+            self.assertFalse(image_path.exists())
+            self.assertTrue((entry_dir / "storyboard_cover.webp").exists())
+            self.assertTrue(updated[0]["preview_image_url"].endswith("storyboard_cover.webp"))
+
 
 if __name__ == "__main__":
     unittest.main()
