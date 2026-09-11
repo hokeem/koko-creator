@@ -102,6 +102,8 @@ THUMB_WARMING: set[str] = set()
 CACHE_RECLAIM_LOCK = threading.Lock()
 CACHE_MIN_FREE_BYTES = int(os.environ.get("CREATOR_CACHE_MIN_FREE_MB", "192")) * 1024 * 1024
 CACHE_MAX_BYTES = int(os.environ.get("CREATOR_CACHE_MAX_MB", "256")) * 1024 * 1024
+ANALYTICS_RETENTION_DAYS = int(os.environ.get("CREATOR_ANALYTICS_RETENTION_DAYS", "180"))
+ANALYTICS_MAX_EVENTS = int(os.environ.get("CREATOR_ANALYTICS_MAX_EVENTS", "200000"))
 ANALYTICS_WRITE_LOCK = threading.Lock()
 ANALYTICS_EVENT_QUEUE: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=4096)
 
@@ -540,6 +542,129 @@ def reclaim_rebuildable_cache_space(
         return removed
     finally:
         CACHE_RECLAIM_LOCK.release()
+
+
+def dir_size_bytes(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return total
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def data_disk_report() -> dict[str, Any]:
+    try:
+        usage = shutil.disk_usage(DATA_ROOT)
+        disk = {
+            "total_mb": round(usage.total / 1024 / 1024, 1),
+            "used_mb": round(usage.used / 1024 / 1024, 1),
+            "free_mb": round(usage.free / 1024 / 1024, 1),
+            "used_percent": round((usage.used / usage.total * 100) if usage.total else 0, 1),
+        }
+    except OSError as exc:
+        disk = {"error": str(exc)}
+    files = {}
+    for name, path in {
+        "library": LIBRARY_FILE,
+        "manual_library": MANUAL_LIBRARY_FILE,
+        "submissions": SUBMISSIONS_FILE,
+        "intakes": INTAKE_FILE,
+        "access_applications": ACCESS_APPLICATIONS_FILE,
+        "creators": CREATORS_FILE,
+        "accounts": ACCOUNTS_FILE,
+        "analytics": ANALYTICS_FILE,
+        "thumbnail_url_cache": THUMB_CACHE_FILE,
+        "video_source_cache": VIDEO_SOURCE_CACHE_FILE,
+        "overrides": OVERRIDES_FILE,
+    }.items():
+        try:
+            files[name] = round(path.stat().st_size / 1024 / 1024, 3) if path.exists() else 0
+        except OSError:
+            files[name] = None
+    dirs = {
+        "script_html_cache": round(dir_size_bytes(SCRIPT_HTML_CACHE_DIR) / 1024 / 1024, 3),
+        "thumbnail_images": round(dir_size_bytes(THUMB_IMAGE_CACHE_DIR) / 1024 / 1024, 3),
+        "manual_script_assets": round(dir_size_bytes(MANUAL_SCRIPT_ASSET_DIR) / 1024 / 1024, 3),
+    }
+    return {"data_root": str(DATA_ROOT), "disk": disk, "files_mb": files, "dirs_mb": dirs}
+
+
+def prune_mapping_cache(path: Path, valid_ids: set[str], *, max_items: int = 1000) -> int:
+    data = read_json_file(path, {})
+    if not isinstance(data, dict):
+        return 0
+    original = len(data)
+    rows: list[tuple[str, dict[str, Any]]] = []
+    for key, value in data.items():
+        entry_id = str(key or "").strip()
+        if entry_id not in valid_ids or not isinstance(value, dict):
+            continue
+        rows.append((entry_id, value))
+    rows.sort(key=lambda item: str(item[1].get("checked_at") or item[1].get("updated_at") or ""), reverse=True)
+    cleaned = dict(rows[:max_items])
+    removed = max(0, original - len(cleaned))
+    if removed:
+        try:
+            write_json_atomic(path, cleaned)
+        except OSError:
+            path.write_text(json.dumps(cleaned, ensure_ascii=False), "utf-8")
+    return removed
+
+
+def prune_analytics_events(
+    *,
+    retention_days: int = ANALYTICS_RETENTION_DAYS,
+    max_events: int = ANALYTICS_MAX_EVENTS,
+) -> dict[str, int]:
+    with ANALYTICS_WRITE_LOCK:
+        events = load_analytics_events()
+        original = len(events)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, retention_days))
+        kept: list[dict[str, Any]] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            created = parse_iso_time(event.get("created_at"))
+            if not created or created >= cutoff:
+                kept.append(event)
+        if max_events > 0 and len(kept) > max_events:
+            kept.sort(key=lambda item: str(item.get("created_at") or ""))
+            kept = kept[-max_events:]
+        if len(kept) != original:
+            try:
+                save_analytics_events(kept)
+            except OSError:
+                ANALYTICS_FILE.write_text(json.dumps(kept, ensure_ascii=False), "utf-8")
+        return {"before": original, "after": len(kept), "removed": max(0, original - len(kept))}
+
+
+def force_creator_storage_cleanup(*, aggressive: bool = False) -> dict[str, Any]:
+    before = data_disk_report()
+    valid_ids = {str(entry.get("entry_id") or "") for entry in load_entries_raw_files()}
+    valid_ids = {entry_id for entry_id in valid_ids if re.fullmatch(r"[0-9a-f]{32}", entry_id)}
+    removed_files = reclaim_rebuildable_cache_space(
+        min_free_bytes=CACHE_MIN_FREE_BYTES,
+        max_cache_bytes=0 if aggressive else CACHE_MAX_BYTES,
+    )
+    removed_thumb_cache = prune_mapping_cache(THUMB_CACHE_FILE, valid_ids)
+    removed_video_cache = prune_mapping_cache(VIDEO_SOURCE_CACHE_FILE, valid_ids)
+    analytics = prune_analytics_events()
+    after = data_disk_report()
+    return {
+        "ok": True,
+        "aggressive": bool(aggressive),
+        "before": before,
+        "after": after,
+        "removed_cache_files": removed_files,
+        "removed_thumbnail_cache_rows": removed_thumb_cache,
+        "removed_video_source_cache_rows": removed_video_cache,
+        "analytics": analytics,
+    }
 
 
 def sync_library(force: bool = False) -> dict[str, Any]:
@@ -4395,6 +4520,19 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
             return
+        if parsed.path == "/api/admin/maintenance/cleanup":
+            if not self.require_admin():
+                return
+            try:
+                payload = self.read_body()
+            except Exception:
+                payload = {}
+            aggressive = str(payload.get("aggressive", "1")).strip().lower() not in {"0", "false", "no", "off"}
+            try:
+                self.send_json(force_creator_storage_cleanup(aggressive=aggressive), status=200)
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc), "after": data_disk_report()}, status=500)
+            return
         if parsed.path == "/api/admin/submissions/backfill-creators":
             if not self.require_admin():
                 return
@@ -4527,9 +4665,14 @@ def main() -> int:
 
     def startup_maintenance() -> None:
         try:
-            removed = reclaim_rebuildable_cache_space()
-            if removed:
-                print(f"startup_cache_reclaimed files={removed}", flush=True)
+            result = force_creator_storage_cleanup(aggressive=True)
+            print(
+                "startup_storage_cleanup "
+                f"files={result.get('removed_cache_files', 0)} "
+                f"analytics_removed={(result.get('analytics') or {}).get('removed', 0)} "
+                f"free_mb={(result.get('after') or {}).get('disk', {}).get('free_mb', '-')}",
+                flush=True,
+            )
         except Exception as exc:
             print(f"startup_cache_reclaim_failed error={exc}", flush=True)
         try:
