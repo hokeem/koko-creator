@@ -185,7 +185,7 @@ def save_overrides(overrides: dict[str, dict[str, Any]]) -> None:
 def apply_entry_override(entry: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:
     item = dict(entry)
     if not isinstance(override, dict):
-        item.setdefault("creator_published", True)
+        item["creator_published"] = item.get("published") is not False and not is_telekwai_script(item)
         return item
     for key in [
         "title",
@@ -226,7 +226,7 @@ def apply_entry_override(entry: dict[str, Any], override: dict[str, Any] | None)
     ]:
         if key in override:
             item[key] = override.get(key)
-    item["creator_published"] = not bool(override.get("hidden") or override.get("deleted"))
+    item["creator_published"] = not bool(override.get("hidden") or override.get("deleted")) and item.get("published") is not False and not is_telekwai_script(item)
     item["creator_override"] = True
     item["creator_override_updated_at"] = override.get("updated_at") or ""
     return item
@@ -457,6 +457,8 @@ def duration_bucket_for_entry(entry: dict[str, Any]) -> str:
 
 def normalized_entry(entry: dict[str, Any]) -> dict[str, Any]:
     item = dict(entry)
+    item["telekwai"] = is_telekwai_script(item)
+    item["script_type"] = "telekwai" if item["telekwai"] else "standard"
     item["title"] = collapse_repeated_text(item.get("title") or "")
     item["whole_video_summary"] = collapse_repeated_text(
         item.get("whole_video_summary") or item.get("summary") or ""
@@ -472,6 +474,13 @@ def normalized_entry(entry: dict[str, Any]) -> dict[str, Any]:
         values = item.get(field)
         item[field] = list(dict.fromkeys(str(value).strip() for value in values if str(value).strip())) if isinstance(values, list) else []
     return item
+
+
+def is_telekwai_script(entry: dict[str, Any]) -> bool:
+    flag = entry.get("telekwai")
+    if isinstance(flag, str):
+        flag = flag.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(flag) or str(entry.get("script_type") or "").strip().lower() == "telekwai"
 
 
 def fetch_text(url: str, timeout: int = 20) -> str:
@@ -958,6 +967,9 @@ def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         "reference_video_enabled": entry.get("reference_video_enabled") is not False,
         "library_date": str(entry.get("library_date") or entry.get("saved_at") or entry.get("created_at") or "")[:10],
         "source": "creator_direct_import",
+        "telekwai": is_telekwai_script(entry),
+        "script_type": "telekwai" if is_telekwai_script(entry) else "standard",
+        "published": entry.get("published") is not False and not is_telekwai_script(entry),
     }
     for dimension in ["relationship", "format", "location", "content"]:
         field = f"{dimension}_tags"
@@ -1014,6 +1026,8 @@ def refresh_entry_snapshot() -> dict[str, Any]:
             if isinstance(override, dict) and override.get("hidden"):
                 continue
             normalized = normalized_entry(apply_entry_override(raw_entry, override))
+            if not normalized.get("creator_published", True):
+                continue
             entries.append(normalized)
             if entry_id:
                 by_id[entry_id] = normalized
@@ -1049,6 +1063,8 @@ def entry_is_effective(entry: dict[str, Any]) -> bool:
 
 
 def admin_entry_scope(entry: dict[str, Any]) -> str:
+    if is_telekwai_script(entry):
+        return "telekwai"
     if not bool(entry.get("creator_published", True)):
         return "hidden"
     if not entry_is_effective(entry):
@@ -1088,7 +1104,7 @@ def admin_entry_sort_key(entry: dict[str, Any]) -> tuple[float, str, str]:
 
 
 def load_admin_entries(scope: str = "portal_visible") -> list[dict[str, Any]]:
-    if scope not in {"portal_visible", "hidden", "incomplete", "all"}:
+    if scope not in {"portal_visible", "telekwai", "hidden", "incomplete", "all"}:
         scope = "portal_visible"
     overrides = load_overrides()
     entries: list[dict[str, Any]] = []
@@ -3182,6 +3198,8 @@ def public_admin_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "duration_label_pt": DURATION_LABELS.get(duration_bucket, {}).get("pt", ""),
         "duration_label_zh": DURATION_LABELS.get(duration_bucket, {}).get("zh", ""),
         "published": bool(entry.get("creator_published", True)),
+        "telekwai": is_telekwai_script(entry),
+        "script_type": "telekwai" if is_telekwai_script(entry) else "standard",
         "overridden": bool(entry.get("creator_override")),
     }
     for dimension in ["relationship", "format", "location", "content"]:
@@ -4207,12 +4225,13 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 offset = 0
             scope = str((q.get("scope") or ["portal_visible"])[0] or "portal_visible").strip()
-            if scope not in {"portal_visible", "hidden", "incomplete", "all"}:
+            if scope not in {"portal_visible", "telekwai", "hidden", "incomplete", "all"}:
                 scope = "portal_visible"
             search = str((q.get("search") or [""])[0] or "").strip().lower()
             all_entries = load_admin_entries("all")
             counts = {
                 "portal_visible": 0,
+                "telekwai": 0,
                 "hidden": 0,
                 "incomplete": 0,
                 "all": len(all_entries),
