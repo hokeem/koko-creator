@@ -33,15 +33,31 @@ class TelekwaiIsolationTests(unittest.TestCase):
             patch.object(app, "load_overrides", return_value={}),
         ):
             recommendations = app.recommendation_payload([], 10)
+            shared_entry = app.entry_by_id(telekwai_id)
             admin_scripts = app.load_admin_entries("telekwai")
 
         self.assertEqual([item["entry_id"] for item in recommendations["entries"]], [normal_id])
+        self.assertIsNotNone(shared_entry)
+        self.assertEqual(shared_entry["entry_id"], telekwai_id)
+        self.assertTrue(shared_entry["creator_published"])
+        self.assertFalse(shared_entry["creator_recommended"])
         self.assertEqual([item["entry_id"] for item in admin_scripts], [telekwai_id])
         self.assertTrue(app.public_admin_entry(admin_scripts[0])["telekwai"])
 
-    def test_admin_override_cannot_publish_telekwai(self) -> None:
+        total, profile_recommendations = app.ranked_scripts_for_creator(
+            ["夫妻"],
+            entries=[shared_entry, app.apply_entry_override(scripts[1], None)],
+        )
+        self.assertEqual(total, 1)
+        self.assertEqual([item["entry_id"] for item in profile_recommendations], [normal_id])
+
+    def test_legacy_unpublished_telekwai_stays_shareable_until_manually_hidden(self) -> None:
         script = {"telekwai": True, "published": False}
-        self.assertFalse(app.apply_entry_override(script, {"hidden": False})["creator_published"])
+        visible = app.apply_entry_override(script, {"hidden": False})
+        hidden = app.apply_entry_override(script, {"hidden": True})
+        self.assertTrue(visible["creator_published"])
+        self.assertFalse(visible["creator_recommended"])
+        self.assertFalse(hidden["creator_published"])
 
 
 if __name__ == "__main__":

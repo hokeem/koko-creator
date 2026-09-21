@@ -185,7 +185,8 @@ def save_overrides(overrides: dict[str, dict[str, Any]]) -> None:
 def apply_entry_override(entry: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:
     item = dict(entry)
     if not isinstance(override, dict):
-        item["creator_published"] = item.get("published") is not False and not is_telekwai_script(item)
+        item["creator_published"] = item.get("published") is not False or is_telekwai_script(item)
+        item["creator_recommended"] = item["creator_published"] and not is_telekwai_script(item)
         return item
     for key in [
         "title",
@@ -226,7 +227,11 @@ def apply_entry_override(entry: dict[str, Any], override: dict[str, Any] | None)
     ]:
         if key in override:
             item[key] = override.get(key)
-    item["creator_published"] = not bool(override.get("hidden") or override.get("deleted")) and item.get("published") is not False and not is_telekwai_script(item)
+    item["creator_published"] = (
+        not bool(override.get("hidden") or override.get("deleted"))
+        and (item.get("published") is not False or is_telekwai_script(item))
+    )
+    item["creator_recommended"] = item["creator_published"] and not is_telekwai_script(item)
     item["creator_override"] = True
     item["creator_override_updated_at"] = override.get("updated_at") or ""
     return item
@@ -969,7 +974,7 @@ def save_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         "source": "creator_direct_import",
         "telekwai": is_telekwai_script(entry),
         "script_type": "telekwai" if is_telekwai_script(entry) else "standard",
-        "published": entry.get("published") is not False and not is_telekwai_script(entry),
+        "published": entry.get("published") is not False or is_telekwai_script(entry),
     }
     for dimension in ["relationship", "format", "location", "content"]:
         field = f"{dimension}_tags"
@@ -1032,7 +1037,7 @@ def refresh_entry_snapshot() -> dict[str, Any]:
             if entry_id:
                 by_id[entry_id] = normalized
         effective = sorted(
-            [entry for entry in entries if entry_is_effective(entry)],
+            [entry for entry in entries if entry.get("creator_recommended", True) and entry_is_effective(entry)],
             key=admin_entry_sort_key,
             reverse=True,
         )
@@ -3349,6 +3354,8 @@ def ranked_scripts_for_creator(
     scored: list[tuple[int, int, dict[str, Any]]] = []
     source_entries = entries if entries is not None else load_entries()
     for idx, entry in enumerate(source_entries):
+        if not entry.get("creator_recommended", not is_telekwai_script(entry)):
+            continue
         text = " ".join([
             str(entry.get("content_type") or ""),
             str(entry.get("title") or ""),
