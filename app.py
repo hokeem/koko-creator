@@ -1454,12 +1454,19 @@ def script_html_for_entry(entry: dict[str, Any]) -> str:
         clean = sanitize_script_html(local_static.read_text("utf-8", errors="ignore"), url)
     else:
         clean = sanitize_script_html(fetch_text(url, timeout=25), url)
+    temp_cache = cache_file.with_name(f"{entry_id}.{uuid4().hex}.tmp")
     try:
         reclaim_rebuildable_cache_space()
         SCRIPT_HTML_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text(clean, "utf-8")
+        temp_cache.write_text(clean, "utf-8")
+        temp_cache.replace(cache_file)
     except OSError:
         pass
+    finally:
+        try:
+            temp_cache.unlink(missing_ok=True)
+        except OSError:
+            pass
     return clean
 
 

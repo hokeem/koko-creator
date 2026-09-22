@@ -75,6 +75,19 @@ class CacheReclamationTests(unittest.TestCase):
                 result = app.script_html_for_entry({"entry_id": entry_id, "html_url": "https://example.com/script"})
         self.assertIn("Restored script", result)
 
+    def test_script_cache_is_replaced_only_after_complete_write(self) -> None:
+        entry_id = "a" * 32
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with (
+                patch.object(app, "SCRIPT_HTML_CACHE_DIR", root),
+                patch.object(app, "fetch_text", return_value="<p>Complete script</p>"),
+                patch.object(app, "reclaim_rebuildable_cache_space"),
+            ):
+                result = app.script_html_for_entry({"entry_id": entry_id, "html_url": "https://example.com/script"})
+            self.assertEqual(result, (root / f"{entry_id}.html").read_text("utf-8"))
+            self.assertFalse(list(root.glob("*.tmp")))
+
     def test_expired_video_source_is_refreshed_even_when_cache_cannot_write(self) -> None:
         entry_id = "a" * 32
         entry = {"entry_id": entry_id, "video_url": "https://www.kwai.com/@creator/video/123"}
