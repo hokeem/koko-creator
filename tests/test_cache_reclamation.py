@@ -47,6 +47,65 @@ class CacheReclamationTests(unittest.TestCase):
         events = enqueue.call_args.args[0]
         self.assertEqual([event["event"] for event in events], ["site_open", "script_open"])
 
+    def test_script_html_survives_full_cache_disk(self) -> None:
+        entry_id = "a" * 32
+        entry = {"entry_id": entry_id, "html_url": "https://example.com/script.html"}
+        raw = "<html><body><h2>Pontos-chave</h2><p>Piada</p><h2>Planos de substituição</h2></body></html>"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(app, "SCRIPT_HTML_CACHE_DIR", Path(temp_dir)),
+                patch.object(app, "fetch_text", return_value=raw),
+                patch.object(app, "reclaim_rebuildable_cache_space"),
+                patch.object(Path, "write_text", side_effect=OSError(28, "No space left on device")),
+            ):
+                result = app.script_html_for_entry(entry)
+        self.assertIn("Pontos-chave", result)
+        self.assertIn("Planos de substituição", result)
+
+    def test_empty_script_cache_is_refetched(self) -> None:
+        entry_id = "a" * 32
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache = Path(temp_dir) / f"{entry_id}.html"
+            cache.touch()
+            with (
+                patch.object(app, "SCRIPT_HTML_CACHE_DIR", Path(temp_dir)),
+                patch.object(app, "fetch_text", return_value="<p>Restored script</p>"),
+                patch.object(app, "reclaim_rebuildable_cache_space"),
+            ):
+                result = app.script_html_for_entry({"entry_id": entry_id, "html_url": "https://example.com/script"})
+        self.assertIn("Restored script", result)
+
+    def test_expired_video_source_is_refreshed_even_when_cache_cannot_write(self) -> None:
+        entry_id = "a" * 32
+        entry = {"entry_id": entry_id, "video_url": "https://www.kwai.com/@creator/video/123"}
+        stale = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        with (
+            patch.object(app, "read_json_file", return_value={entry_id: {"video_source_url": "https://old.example/video.mp4", "checked_at": stale}}),
+            patch.object(app, "fetch_text", return_value="video metadata"),
+            patch.object(app, "meta_video_source", return_value="https://new.example/video.mp4"),
+            patch.object(app, "write_json_atomic", side_effect=OSError(28, "No space left on device")),
+        ):
+            source = app.video_source_url(entry)
+        self.assertEqual(source, "https://new.example/video.mp4")
+
+    def test_signed_video_url_refreshes_before_expiry(self) -> None:
+        entry_id = "a" * 32
+        entry = {"entry_id": entry_id, "video_url": "https://www.kwai.com/@creator/video/123"}
+        expiring = int(datetime.now(timezone.utc).timestamp()) + 60
+        cache = {entry_id: {
+            "video_source_url": f"https://cdn.example/video.mp4?tag=1-{expiring}-s-0-token",
+            "video_url": entry["video_url"],
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }}
+        with (
+            patch.object(app, "read_json_file", return_value=cache),
+            patch.object(app, "fetch_text", return_value="new metadata"),
+            patch.object(app, "meta_video_source", return_value="https://cdn.example/fresh.mp4"),
+            patch.object(app, "write_json_atomic"),
+        ):
+            source = app.video_source_url(entry)
+        self.assertEqual(source, "https://cdn.example/fresh.mp4")
+
     def test_force_cleanup_removes_rebuildable_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

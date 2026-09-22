@@ -1440,22 +1440,26 @@ def script_html_for_entry(entry: dict[str, Any]) -> str:
         return ""
     cache_file = SCRIPT_HTML_CACHE_DIR / f"{entry_id}.html"
     if cache_file.exists():
-        return cache_file.read_text("utf-8", errors="ignore")
+        try:
+            cached = cache_file.read_text("utf-8", errors="ignore")
+            if cached.strip():
+                return cached
+        except OSError:
+            pass
     url = abs_url(entry.get("pt_html_url") or entry.get("html_url") or entry.get("zh_html_url"))
     if not url:
         return ""
     local_static = local_static_file_from_url(url)
     if local_static:
         clean = sanitize_script_html(local_static.read_text("utf-8", errors="ignore"), url)
+    else:
+        clean = sanitize_script_html(fetch_text(url, timeout=25), url)
+    try:
         reclaim_rebuildable_cache_space()
         SCRIPT_HTML_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         cache_file.write_text(clean, "utf-8")
-        return clean
-    raw = fetch_text(url, timeout=25)
-    clean = sanitize_script_html(raw, url)
-    reclaim_rebuildable_cache_space()
-    SCRIPT_HTML_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(clean, "utf-8")
+    except OSError:
+        pass
     return clean
 
 
@@ -1543,19 +1547,33 @@ def official_video_embed_url(source_url: str) -> tuple[str, str]:
 def video_source_url(entry: dict[str, Any]) -> str:
     entry_id = str(entry.get("entry_id") or "")
     cache = read_json_file(VIDEO_SOURCE_CACHE_FILE, {})
-    if isinstance(cache, dict) and entry_id in cache and cache[entry_id].get("video_source_url"):
-        return str(cache[entry_id]["video_source_url"])
+    if not isinstance(cache, dict):
+        cache = {}
+    cached = cache.get(entry_id) if isinstance(cache.get(entry_id), dict) else {}
     source_page = str(entry.get("video_url") or "")
+    checked_at = str(cached.get("checked_at") or "")
+    try:
+        checked = datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
+        fresh = checked.tzinfo is not None and datetime.now(timezone.utc) - checked < timedelta(hours=6)
+    except ValueError:
+        fresh = False
+    cached_source = str(cached.get("video_source_url") or "")
+    expiry_match = re.search(r"(?:[?&]tag=1-|%3Ftag%3D1-)(\d{10})-", cached_source)
+    if expiry_match and int(expiry_match.group(1)) <= time.time() + 300:
+        fresh = False
+    if fresh and cached.get("video_url") == source_page and cached_source:
+        return cached_source
     source = ""
     if source_page:
         try:
             source = meta_video_source(fetch_text(source_page, timeout=12))
         except Exception:
             source = ""
-    if not isinstance(cache, dict):
-        cache = {}
-    cache[entry_id] = {"video_source_url": source, "checked_at": now_iso()}
-    write_json_atomic(VIDEO_SOURCE_CACHE_FILE, cache)
+    cache[entry_id] = {"video_source_url": source, "video_url": source_page, "checked_at": now_iso()}
+    try:
+        write_json_atomic(VIDEO_SOURCE_CACHE_FILE, cache)
+    except OSError:
+        pass
     return source
 
 
@@ -4057,7 +4075,7 @@ function ptTitle(e){{return preferPortugueseText(e.title)||String(e.title||"Rote
 function sketchSvg(i){{const variants=[`<path d="M18 82 H92 M22 82 Q42 60 62 82 M50 24 q18 4 19 22 q-3 24-20 28 q-17-7-18-28 q2-18 19-22Z"/><path d="M48 75 v34 M30 100 q18-18 38 0 M70 38 h30 v82"/>`,`<path d="M16 88 h96 M54 26 q18 4 18 23 q-2 22-20 26 q-19-6-20-26 q3-18 22-23Z"/><path d="M50 74 q-6 26-2 48 M26 98 q24-14 50 0 M78 34 h28 v92 M36 50 l-18 22"/>`,`<path d="M18 88 h94 M58 30 q17 3 18 23 q-3 22-20 26 q-18-6-19-26 q2-19 21-23Z"/><path d="M54 77 q-10 26-1 48 M28 98 q22-12 49 2 M82 36 h24 v88"/>`,`<path d="M18 28 v100 M18 96 h110 M42 76 l38-28 M43 82 l38-28 M76 43 q18 10 32 28"/><path d="M70 74 q16 10 32 22"/>`,`<path d="M14 92 h114 M50 24 q18 3 20 22 q-2 24-20 28 q-18-6-20-28 q2-18 20-22Z"/><path d="M48 74 q-6 30 0 52 M24 102 q24-16 53 0 M86 52 q10 6 20 20 M92 82 q10 7 25 6"/>`,`<path d="M22 68 h78 M22 102 h80 M50 68 l-14 34 M82 68 l-14 34"/><path d="M86 64 q26 5 30 28 q-8 16-26 12 M94 86 l30-16"/>`,`<path d="M64 24 q18 6 20 24 q-4 24-23 28 q-18-8-17-29 q4-19 20-23Z"/><path d="M60 78 v48 M36 110 q25-14 51 0 M22 34 h28 M24 34 v88"/>`,`<path d="M16 92 h112 M54 24 q18 4 20 23 q-2 23-21 27 q-18-6-19-27 q3-19 20-23Z"/><path d="M52 76 q-4 27 2 50 M28 102 q24-14 52 1 M92 50 q12 7 24 24 M98 84 q11 7 26 5"/>`,`<path d="M68 28 q20 6 21 25 q-4 24-23 28 q-19-7-19-29 q3-20 21-24Z"/><path d="M48 88 q20 18 44 0 M45 102 q26 22 54 0 M44 118 h58"/>`];return `<svg viewBox="0 0 132 132" aria-hidden="true"><rect width="132" height="132" fill="#fbfaf7"/><path d="M0 0h132v132H0z" fill="none" stroke="#222" stroke-width="1.2"/>${{variants[i%variants.length]}}</svg>`}}
 function collectReferenceImages(doc,e){{const imgs=[...doc.querySelectorAll("img")].map(img=>img.getAttribute("src")||"").filter(Boolean);if(e.thumbnail_url)imgs.unshift(e.thumbnail_url);return imgs.filter((x,i,a)=>x&&a.indexOf(x)===i).slice(0,4)}}
 function portugueseDemoScript(e){{return {{original:"https://www.kwai.com/@Suelen_michelini/video/5209970453127473266",main:"O vídeo começa com a esposa ficando doente; ela parece fraca e sem forças, e, com um ar carinhoso, pede atenção e cuidados ao marido. Embora o marido pareça um pouco resignado, ele cuida dela com carinho, lavando e estendendo suas roupas.",points:["Interação carinhosa entre os cônjuges"],adaptable:["O enredo da doença"],images:e.thumbnail_url?[e.thumbnail_url]:[],segments:[{{time:"00:00-00:05",image:"À porta do quarto; esposa vestida com pijama, com aspecto frágil.",action:"A esposa está encostada na porta, com uma expressão de fraqueza e desânimo.",dialogue:"Legenda: Quando eu fico doente"}},{{time:"00:05-00:10",image:"Quarto; esposa deitada na cama, coberta com o cobertor.",action:"A esposa está deitada na cama, parecendo exausta; o marido a observa.",dialogue:"Esposa: Ai, meu Deus, eu tô horrível. Eu acho que eu não passo."}},{{time:"00:10-00:15",image:"Quarto; esposa deitada na cama, marido ao lado da cama.",action:"A esposa olha para o marido com um tom de voz carinhoso e aponta para as roupas.",dialogue:"Esposa: Lava a roupa pra mim."}},{{time:"00:15-00:20",image:"Lavanderia; marido segurando roupas; máquina de lavar e roupas ao fundo.",action:"O marido segura uma pilha de roupas, com uma expressão um pouco hesitante.",dialogue:""}},{{time:"00:20-00:25",image:"Quarto; esposa deitada na cama, pegando o celular.",action:"A esposa pega o celular e parece estar fazendo algo nele.",dialogue:""}},{{time:"00:25-00:30",image:"Quarto; esposa olhando para o celular, marido ao lado.",action:"Enquanto olha para o celular, a esposa fala com o marido em tom de reclamação.",dialogue:"Esposa: Que você não tá me dando atenção. Eu tô aqui morrendo, você nem tá vendo."}},{{time:"00:30-00:33",image:"Quarto; esposa segurando a chaleira, marido ao lado.",action:"A esposa chama o marido com o sino do celular, e ele se aproxima segurando uma chaleira.",dialogue:""}}]}}}}
-function readInsightCards(doc,titlePattern){{const cards=[];const headings=[...doc.querySelectorAll("h2,h3")];const h=headings.find(x=>titlePattern.test(normalizeLabel(x.textContent)));if(!h)return cards;let node=h.nextElementSibling;while(node&&!/^H2$/i.test(node.tagName)){{node.querySelectorAll(".insight").forEach(card=>{{const parts=[...card.children].map(x=>preferPortugueseText(x.textContent)).filter(Boolean);if(parts.length)cards.push({{title:parts[0],body:parts.slice(1).join(" ")}})}});node=node.nextElementSibling}}return uniqueCards(cards)}}
+function readInsightCards(doc,titlePattern){{const cards=[];const headings=[...doc.querySelectorAll("h2,h3")];const h=headings.find(x=>titlePattern.test(normalizeLabel(x.textContent)));if(!h)return cards;const section=h.closest(".card");if(section){{section.querySelectorAll(".insight").forEach(card=>{{const parts=[...card.children].map(x=>preferPortugueseText(x.textContent)).filter(Boolean);if(parts.length)cards.push({{title:parts[0],body:parts.slice(1).join(" ")}})}})}}else{{let node=h.nextElementSibling;while(node&&!/^H[23]$/i.test(node.tagName)){{node.querySelectorAll(".insight").forEach(card=>{{const parts=[...card.children].map(x=>preferPortugueseText(x.textContent)).filter(Boolean);if(parts.length)cards.push({{title:parts[0],body:parts.slice(1).join(" ")}})}});node=node.nextElementSibling}}}}return uniqueCards(cards)}}
 function extractScriptData(raw,e){{const doc=new DOMParser().parseFromString(String(raw||""),"text/html");const data={{original:collapseRepeatedText(preferPortugueseText(e.video_url||"")),main:collapseRepeatedText(preferPortugueseText(e.summary)||""),points:[],adaptable:[],pointCards:readInsightCards(doc,/pontos-chave|pontos principais/),adaptableCards:readInsightCards(doc,/planos de substituicao|partes.*adapt/),segments:[],images:collectReferenceImages(doc,e)}};doc.querySelectorAll("tr").forEach(tr=>{{const cells=[...tr.children].map(td=>preferPortugueseText(td.textContent));if(cells.length<2)return;const key=normalizeLabel(cells[0]);const val=uniqueCellValues(cells.slice(1)).join(" ").trim();if(/video original|original/.test(key))data.original=val||data.original;if(/conteudo principal|resumo geral|resumo do video|contenido principal|内容|整体/.test(key))data.main=val||data.main;if(/pontos principais|points?|ponto principal|看点|爆点|重点/.test(key))data.points.push(val);if(/partes.*adapt|adaptadas|adaptavel|适配|替换/.test(key))data.adaptable.push(val);}});doc.querySelectorAll("table").forEach(table=>{{const rows=[...table.querySelectorAll("tr")].map(tr=>[...tr.children].map(td=>preferPortugueseText(td.textContent))).filter(r=>r.length);const headIndex=rows.findIndex(r=>r.some(c=>/tempo|时间/i.test(c))&&(r.some(c=>/imagem|conteudo visual|visual|画面|image/i.test(c))||r.length>=4));if(headIndex<0)return;const heads=rows[headIndex].map(normalizeLabel);const idx=n=>heads.findIndex(h=>n.some(x=>h.includes(x)));let ti=idx(["tempo","时间"]), im=idx(["imagem","conteudo visual","visual","画面","image"]), ac=idx(["acoes","acao","动作","action"]), di=idx(["dialogos","dialogo","台词","对白","dialogue"]);if(ti<0&&heads.length>=4){{ti=0;im=1;ac=2;di=3}}rows.slice(headIndex+1).forEach(r=>{{if(ti<0||!r[ti])return;data.segments.push({{time:r[ti]||"",image:im>=0?r[im]||"":"",action:ac>=0?r[ac]||"":"",dialogue:di>=0?r[di]||"":""}})}})}});data.points=splitBrief(data.points).filter(x=>x&&x!==data.main);data.adaptable=splitBrief(data.adaptable);return data}}
 function splitBrief(list){{const out=[];const seen=new Set();list.flatMap(x=>String(x||"").split(/(?:\\n|；|;|\d+[.、])/).map(preferPortugueseText).map(collapseRepeatedText).filter(Boolean)).forEach(v=>{{const key=normalizeLabel(v);if(!seen.has(key)){{seen.add(key);out.push(v)}}}});return out.slice(0,6)}}
 function storyFrameHtml(f,img,i){{return `<div class="story-frame">${{sketchSvg(i)}}<span>${{esc(f.time||`00:${{String(i*5).padStart(2,"0")}}`)}}</span></div>`}}
