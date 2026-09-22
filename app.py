@@ -605,7 +605,16 @@ def data_disk_report() -> dict[str, Any]:
         "thumbnail_images": round(dir_size_bytes(THUMB_IMAGE_CACHE_DIR) / 1024 / 1024, 3),
         "manual_script_assets": round(dir_size_bytes(MANUAL_SCRIPT_ASSET_DIR) / 1024 / 1024, 3),
     }
-    return {"data_root": str(DATA_ROOT), "disk": disk, "files_mb": files, "dirs_mb": dirs}
+    root_items = {}
+    try:
+        for path in DATA_ROOT.iterdir():
+            if path.is_dir():
+                root_items[path.name] = round(dir_size_bytes(path) / 1024 / 1024, 3)
+            elif path.is_file():
+                root_items[path.name] = round(path.stat().st_size / 1024 / 1024, 3)
+    except OSError:
+        pass
+    return {"data_root": str(DATA_ROOT), "disk": disk, "files_mb": files, "dirs_mb": dirs, "root_items_mb": root_items}
 
 
 def prune_mapping_cache(path: Path, valid_ids: set[str], *, max_items: int = 1000) -> int:
