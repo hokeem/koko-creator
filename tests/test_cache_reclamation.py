@@ -9,6 +9,31 @@ import app
 
 
 class CacheReclamationTests(unittest.TestCase):
+    def test_failed_atomic_write_removes_partial_temp_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "creator_analytics_events.json"
+            with patch.object(Path, "replace", side_effect=OSError(28, "No space left on device")):
+                with self.assertRaises(OSError):
+                    app.write_json_atomic(target, [{"event": "test"}])
+            self.assertEqual(list(Path(temp_dir).iterdir()), [])
+
+    def test_stale_atomic_temp_cleanup_preserves_recent_and_unrelated_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            stale = root / ("creator_analytics_events.json.39." + "a" * 32 + ".tmp")
+            recent = root / ("creator_analytics_events.json.39." + "b" * 32 + ".tmp")
+            unrelated = root / "creator_analytics_events.json"
+            for path in (stale, recent, unrelated):
+                path.write_bytes(b"data")
+            old = stale.stat().st_mtime - 600
+            os.utime(stale, (old, old))
+            with patch.object(app, "DATA_ROOT", root):
+                result = app.cleanup_stale_atomic_temp_files(min_age_seconds=300)
+            self.assertEqual(result["removed"], 1)
+            self.assertFalse(stale.exists())
+            self.assertTrue(recent.exists())
+            self.assertTrue(unrelated.exists())
+
     def test_oldest_rebuildable_cache_is_removed_when_over_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

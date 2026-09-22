@@ -157,8 +157,11 @@ def read_json_file(path: Path, default: Any) -> Any:
 def write_json_atomic(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), "utf-8")
-    tmp.replace(path)
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), "utf-8")
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def client_ip(headers: Any) -> str:
@@ -571,6 +574,29 @@ def dir_size_bytes(path: Path) -> int:
     return total
 
 
+def cleanup_stale_atomic_temp_files(*, min_age_seconds: int = 300) -> dict[str, Any]:
+    cutoff = time.time() - min_age_seconds
+    removed = 0
+    freed_bytes = 0
+    try:
+        candidates = DATA_ROOT.iterdir()
+        for path in candidates:
+            if not re.fullmatch(r"[a-z][a-z0-9_]*\.json\.\d+\.[0-9a-f]{32}\.tmp", path.name):
+                continue
+            try:
+                stat = path.stat()
+                if not path.is_file() or stat.st_mtime >= cutoff:
+                    continue
+                path.unlink()
+                removed += 1
+                freed_bytes += stat.st_size
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return {"removed": removed, "freed_mb": round(freed_bytes / 1024 / 1024, 3)}
+
+
 def data_disk_report() -> dict[str, Any]:
     try:
         usage = shutil.disk_usage(DATA_ROOT)
@@ -773,6 +799,7 @@ def optimize_manual_script_assets(
 
 def force_creator_storage_cleanup(*, aggressive: bool = False) -> dict[str, Any]:
     before = data_disk_report()
+    stale_temp_files = cleanup_stale_atomic_temp_files()
     valid_ids = {str(entry.get("entry_id") or "") for entry in load_entries_raw_files()}
     valid_ids = {entry_id for entry_id in valid_ids if re.fullmatch(r"[0-9a-f]{32}", entry_id)}
     removed_files = reclaim_rebuildable_cache_space(
@@ -789,6 +816,7 @@ def force_creator_storage_cleanup(*, aggressive: bool = False) -> dict[str, Any]
         "aggressive": bool(aggressive),
         "before": before,
         "after": after,
+        "stale_temp_files": stale_temp_files,
         "removed_cache_files": removed_files,
         "removed_thumbnail_cache_rows": removed_thumb_cache,
         "removed_video_source_cache_rows": removed_video_cache,
