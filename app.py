@@ -189,7 +189,7 @@ def apply_entry_override(entry: dict[str, Any], override: dict[str, Any] | None)
     item = dict(entry)
     if not isinstance(override, dict):
         item["creator_published"] = item.get("published") is not False or is_telekwai_script(item)
-        item["creator_recommended"] = item["creator_published"] and not is_telekwai_script(item)
+        item["creator_recommended"] = is_creator_recommended(item)
         return item
     for key in [
         "title",
@@ -234,7 +234,7 @@ def apply_entry_override(entry: dict[str, Any], override: dict[str, Any] | None)
         not bool(override.get("hidden") or override.get("deleted"))
         and (item.get("published") is not False or is_telekwai_script(item))
     )
-    item["creator_recommended"] = item["creator_published"] and not is_telekwai_script(item)
+    item["creator_recommended"] = is_creator_recommended(item)
     item["creator_override"] = True
     item["creator_override_updated_at"] = override.get("updated_at") or ""
     return item
@@ -489,6 +489,14 @@ def is_telekwai_script(entry: dict[str, Any]) -> bool:
     if isinstance(flag, str):
         flag = flag.strip().lower() in {"1", "true", "yes", "on"}
     return bool(flag) or str(entry.get("script_type") or "").strip().lower() == "telekwai"
+
+
+def is_creator_recommended(entry: dict[str, Any]) -> bool:
+    return bool(
+        entry.get("creator_published", True)
+        and not is_telekwai_script(entry)
+        and entry.get("reference_video_enabled") is not False
+    )
 
 
 def fetch_text(url: str, timeout: int = 20) -> str:
@@ -3416,7 +3424,7 @@ def ranked_scripts_for_creator(
     scored: list[tuple[int, int, dict[str, Any]]] = []
     source_entries = entries if entries is not None else load_entries()
     for idx, entry in enumerate(source_entries):
-        if not entry.get("creator_recommended", not is_telekwai_script(entry)):
+        if not entry.get("creator_recommended", is_creator_recommended(entry)):
             continue
         text = " ".join([
             str(entry.get("content_type") or ""),
