@@ -1893,6 +1893,82 @@ def save_submission(payload: dict[str, Any], *, account: dict[str, Any] | None =
     return submission
 
 
+def import_admin_submission(payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Idempotently import a trusted creator return into dashboard analytics."""
+    entry_id = str(payload.get("entry_id") or "").strip()
+    video_url = str(payload.get("video_url") or "").strip()
+    profile_id = str(payload.get("creator_profile_id") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", entry_id):
+        raise ValueError("Invalid script id.")
+    if not video_url.startswith(("http://", "https://")):
+        raise ValueError("Please submit a public video link.")
+    entry = entry_by_id(entry_id)
+    if not entry:
+        raise ValueError("Script not found.")
+    profile = next(
+        (
+            item
+            for item in load_creator_profiles()
+            if isinstance(item, dict) and str(item.get("profile_id") or "") == profile_id
+        ),
+        None,
+    )
+    if not profile:
+        raise ValueError("Creator profile not found.")
+
+    creator_id = canonical_account_key(
+        str(
+            profile.get("account_id")
+            or profile.get("phone")
+            or profile.get("kwai_id")
+            or profile.get("uid")
+            or profile_id
+        )
+    )
+    normalized_video_url = normalize_submission_video_url(video_url)
+    submitted_at = str(payload.get("created_at") or payload.get("return_time") or now_iso()).strip() or now_iso()
+    submissions = read_json_file(SUBMISSIONS_FILE, [])
+    if not isinstance(submissions, list):
+        submissions = []
+    existing = next(
+        (
+            item
+            for item in submissions
+            if isinstance(item, dict)
+            and str(item.get("entry_id") or "") == entry_id
+            and normalize_submission_video_url(item.get("video_url") or "") == normalized_video_url
+            and (
+                str(item.get("creator_profile_id") or "") == profile_id
+                or canonical_account_key(str(item.get("creator_id") or "")) == creator_id
+            )
+        ),
+        None,
+    )
+    values = {
+        "entry_id": entry_id,
+        "script_title": str(entry.get("title") or ""),
+        "script_content_type": str(entry.get("content_type") or DEFAULT_CONTENT_TYPE),
+        "submitted_title": str(payload.get("submitted_title") or entry.get("title") or ""),
+        "thumbnail_url": str(payload.get("thumbnail_url") or f"/api/creator/thumbnail/{entry_id}.webp"),
+        "creator_id": creator_id or profile_id,
+        "creator_profile_id": profile_id,
+        "creator_profile_name": str(profile.get("name") or profile.get("kwai_id") or "Kwai creator"),
+        "creator_profile_kwai_id": str(profile.get("kwai_id") or ""),
+        "detected_kwai_id": str(profile.get("kwai_id") or kwai_handle_from_url(video_url) or ""),
+        "video_url": video_url,
+        "status": str(payload.get("status") or "pending_review"),
+        "created_at": submitted_at,
+        "import_source": str(payload.get("source") or "creator_admin_import"),
+    }
+    created = existing is None
+    if existing is None:
+        existing = {"submission_id": uuid4().hex}
+        submissions.insert(0, existing)
+    existing.update(values)
+    write_json_atomic(SUBMISSIONS_FILE, submissions[:1000])
+    return existing, created
+
+
 def delete_submissions_by_ids(submission_ids: list[str]) -> dict[str, Any]:
     ids = {str(item or "").strip() for item in submission_ids if str(item or "").strip()}
     if not ids:
@@ -2866,6 +2942,11 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
 
     matched_submission_accounts: set[int] = set()
     submission_count = 0
+    profiles_by_id = {
+        str(profile.get("profile_id") or ""): profile
+        for profile in load_creator_profiles()
+        if isinstance(profile, dict) and str(profile.get("profile_id") or "")
+    }
     for submission in submissions:
         candidates = [
             canonical_account_key(str(submission.get("creator_id") or "")),
@@ -2873,9 +2954,25 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
             normalize_account_key(normalize_kwai_id(kwai_handle_from_url(str(submission.get("video_url") or "")))),
         ]
         account = next((alias_lookup[value] for value in candidates if value and value in alias_lookup), None)
+        profile = profiles_by_id.get(str(submission.get("creator_profile_id") or ""))
+        if not account and profile:
+            profile_candidates = [
+                canonical_account_key(str(profile.get("account_id") or "")),
+                canonical_account_key(str(profile.get("phone") or "")),
+                canonical_account_key(str(profile.get("uid") or "")),
+                normalize_account_key(normalize_kwai_id(str(profile.get("kwai_id") or ""))),
+            ]
+            account = next((alias_lookup[value] for value in profile_candidates if value and value in alias_lookup), None)
         if account and id(account) not in test_accounts:
             submission_count += 1
             matched_submission_accounts.add(id(account))
+        elif profile and "666" not in {
+            str(profile.get("account_id") or "").strip(),
+            str(profile.get("phone") or "").strip(),
+            str(profile.get("uid") or "").strip(),
+            str(profile.get("kwai_id") or "").strip(),
+        }:
+            submission_count += 1
 
     registered_users = sum(
         1
@@ -3505,6 +3602,8 @@ def public_creator_profile(
         item for item in submissions
         if isinstance(item, dict)
         and (
+            str(item.get("creator_profile_id") or "") == str(profile.get("profile_id") or "")
+            or
             normalize_account_key(item.get("creator_id") or "") in creator_keys
             or (creator_kwai and submission_kwai_id(item) == creator_kwai)
         )
@@ -3587,6 +3686,8 @@ def creator_recommendations_for_profile(profile_id: str, limit: int = 5, offset:
         item for item in submissions
         if isinstance(item, dict)
         and (
+            str(item.get("creator_profile_id") or "") == str(profile.get("profile_id") or "")
+            or
             normalize_account_key(item.get("creator_id") or "") in creator_keys
             or (creator_kwai and submission_kwai_id(item) == creator_kwai)
         )
@@ -4745,6 +4846,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(backfill_submission_creators(limit), status=200)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
+            return
+        if parsed.path == "/api/admin/submissions/import":
+            if not self.require_admin():
+                return
+            try:
+                submission, created = import_admin_submission(self.read_body())
+                self.send_json({"ok": True, "created": created, "submission": submission}, status=201 if created else 200)
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=400)
             return
         if parsed.path == "/api/admin/submissions/delete":
             if not self.require_admin():
