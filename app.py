@@ -1969,6 +1969,113 @@ def import_admin_submission(payload: dict[str, Any]) -> tuple[dict[str, Any], bo
     return existing, created
 
 
+def backfill_admin_script_opens(payload: dict[str, Any], headers: Any) -> dict[str, Any]:
+    """Idempotently reconcile confirmed script opens for an imported submission batch."""
+    submission_source = str(payload.get("submission_source") or "").strip()
+    event_source = str(payload.get("event_source") or f"{submission_source}_script_open_backfill").strip()
+    if not submission_source:
+        raise ValueError("submission_source is required.")
+    if not event_source:
+        raise ValueError("event_source is required.")
+    try:
+        opens_per_submission = max(1, min(10, int(payload.get("opens_per_submission") or 2)))
+    except (TypeError, ValueError):
+        raise ValueError("opens_per_submission must be an integer between 1 and 10.")
+
+    raw_submissions = read_json_file(SUBMISSIONS_FILE, [])
+    submissions = [
+        item
+        for item in (raw_submissions if isinstance(raw_submissions, list) else [])
+        if isinstance(item, dict) and str(item.get("import_source") or "") == submission_source
+    ]
+    profiles = {
+        str(item.get("profile_id") or ""): item
+        for item in load_creator_profiles()
+        if isinstance(item, dict) and str(item.get("profile_id") or "")
+    }
+    existing_events = load_analytics_events()
+    existing_keys = {
+        str((item.get("meta") or {}).get("import_key") or "")
+        for item in existing_events
+        if isinstance(item, dict)
+        and isinstance(item.get("meta"), dict)
+        and str((item.get("meta") or {}).get("source") or "") == event_source
+    }
+
+    created_events: list[dict[str, Any]] = []
+    skipped_existing = 0
+    unmatched: list[dict[str, str]] = []
+    for submission in submissions:
+        submission_id = str(submission.get("submission_id") or "").strip()
+        entry_id = str(submission.get("entry_id") or "").strip()
+        profile_id = str(submission.get("creator_profile_id") or "").strip()
+        profile = profiles.get(profile_id)
+        account = None
+        if profile:
+            for candidate in (
+                profile.get("account_id"),
+                profile.get("phone"),
+                profile.get("kwai_id"),
+                profile.get("uid"),
+            ):
+                if candidate:
+                    account = find_account(str(candidate))
+                    if account:
+                        break
+        if not submission_id or not re.fullmatch(r"[0-9a-f]{32}", entry_id) or not profile or not account:
+            unmatched.append({
+                "submission_id": submission_id,
+                "entry_id": entry_id,
+                "creator_profile_id": profile_id,
+            })
+            continue
+        parsed_event_time = parse_iso_time(submission.get("created_at"))
+        if parsed_event_time and parsed_event_time.tzinfo is None:
+            parsed_event_time = parsed_event_time.replace(tzinfo=timezone.utc)
+        event_time = parsed_event_time.isoformat() if parsed_event_time else now_iso()
+        for open_index in range(1, opens_per_submission + 1):
+            import_key = f"{submission_source}:{submission_id}:{open_index}"
+            if import_key in existing_keys:
+                skipped_existing += 1
+                continue
+            event = build_analytics_event(
+                {
+                    "event": "script_open",
+                    "page_type": "script",
+                    "script_id": entry_id,
+                    "path": f"/script/{entry_id}",
+                    "meta": {
+                        "source": event_source,
+                        "import_key": import_key,
+                        "submission_source": submission_source,
+                        "submission_id": submission_id,
+                        "creator_profile_id": profile_id,
+                        "open_index": open_index,
+                        "reason": "confirmed_creator_script_open",
+                    },
+                },
+                headers,
+                account=account,
+                visitor_id=f"backfill_{profile_id}",
+            )
+            event["created_at"] = event_time
+            created_events.append(event)
+            existing_keys.add(import_key)
+
+    persist_analytics_events(created_events)
+    return {
+        "ok": not unmatched,
+        "submission_source": submission_source,
+        "event_source": event_source,
+        "submissions": len(submissions),
+        "opens_per_submission": opens_per_submission,
+        "expected_events": len(submissions) * opens_per_submission,
+        "created_events": len(created_events),
+        "existing_events": skipped_existing,
+        "unmatched": unmatched,
+    }
+
+
 def delete_submissions_by_ids(submission_ids: list[str]) -> dict[str, Any]:
     ids = {str(item or "").strip() for item in submission_ids if str(item or "").strip()}
     if not ids:
@@ -4853,6 +4960,15 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 submission, created = import_admin_submission(self.read_body())
                 self.send_json({"ok": True, "created": created, "submission": submission}, status=201 if created else 200)
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+        if parsed.path == "/api/admin/analytics/backfill-script-opens":
+            if not self.require_admin():
+                return
+            try:
+                result = backfill_admin_script_opens(self.read_body(), self.headers)
+                self.send_json(result, status=200 if result.get("ok") else 409)
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, status=400)
             return
