@@ -189,10 +189,65 @@ class CacheReclamationTests(unittest.TestCase):
 
             with patch.object(app, "ANALYTICS_FILE", path):
                 result = app.prune_analytics_events(retention_days=180, max_events=100)
-                kept = app.json.loads(path.read_text("utf-8"))
+                kept = app.load_analytics_events()
 
             self.assertEqual(result["removed"], 1)
             self.assertEqual([event["event_id"] for event in kept], ["recent"])
+            self.assertFalse(path.exists())
+            self.assertTrue(path.with_suffix(".jsonl").exists())
+
+    def test_analytics_events_migrate_once_and_append_without_rewriting_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "creator_analytics_events.json"
+            path.write_text(app.json.dumps([{"event_id": "old", "created_at": "2026-10-01T00:00:00+00:00"}]), "utf-8")
+
+            with patch.object(app, "ANALYTICS_FILE", path):
+                app.persist_analytics_events([{"event_id": "new", "created_at": "2026-10-09T00:00:00+00:00"}])
+                kept = app.load_analytics_events()
+
+            self.assertEqual([event["event_id"] for event in kept], ["old", "new"])
+            self.assertFalse(path.exists())
+            lines = path.with_suffix(".jsonl").read_text("utf-8").splitlines()
+            self.assertEqual(len(lines), 2)
+
+    def test_analytics_append_recovers_after_a_partial_final_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "creator_analytics_events.json"
+            log_path = path.with_suffix(".jsonl")
+            log_path.write_text('{"event_id":"complete"}\n{"event_id":"partial"', "utf-8")
+
+            with patch.object(app, "ANALYTICS_FILE", path):
+                app.persist_analytics_events([{"event_id": "next"}])
+                kept = app.load_analytics_events()
+
+            self.assertEqual([event["event_id"] for event in kept], ["complete", "next"])
+
+    def test_accounts_are_reused_until_the_file_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "creator_accounts.json"
+            account = {
+                "account_id": "1234",
+                "phone": "1234",
+                "display_name": "Creator",
+                "status": "active",
+                "source": "admin",
+                "registration_status": "unregistered",
+                "provisioned_at": "2026-10-01T00:00:00+00:00",
+                "state": {},
+            }
+            path.write_text(app.json.dumps([account]), "utf-8")
+            original_read = app.read_json_file
+            with (
+                patch.object(app, "ACCOUNTS_FILE", path),
+                patch.object(app, "DEFAULT_ALLOWED_ACCOUNTS", []),
+                patch.object(app, "ACCOUNTS_CACHE", {"signature": None, "accounts": []}),
+                patch.object(app, "read_json_file", wraps=original_read) as read_json,
+            ):
+                first = app.load_accounts()
+                second = app.load_accounts()
+
+            self.assertEqual(first, second)
+            self.assertEqual(read_json.call_count, 1)
 
     def test_manual_asset_optimizer_rewrites_library_urls(self) -> None:
         if app.Image is None:

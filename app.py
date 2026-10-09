@@ -104,8 +104,10 @@ CACHE_MIN_FREE_BYTES = int(os.environ.get("CREATOR_CACHE_MIN_FREE_MB", "192")) *
 CACHE_MAX_BYTES = int(os.environ.get("CREATOR_CACHE_MAX_MB", "256")) * 1024 * 1024
 ANALYTICS_RETENTION_DAYS = int(os.environ.get("CREATOR_ANALYTICS_RETENTION_DAYS", "180"))
 ANALYTICS_MAX_EVENTS = int(os.environ.get("CREATOR_ANALYTICS_MAX_EVENTS", "200000"))
-ANALYTICS_WRITE_LOCK = threading.Lock()
+ANALYTICS_WRITE_LOCK = threading.RLock()
 ANALYTICS_EVENT_QUEUE: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=4096)
+ACCOUNTS_CACHE_LOCK = threading.RLock()
+ACCOUNTS_CACHE: dict[str, Any] = {"signature": None, "accounts": []}
 
 
 QUESTIONS = [
@@ -589,7 +591,7 @@ def cleanup_stale_atomic_temp_files(*, min_age_seconds: int = 300) -> dict[str, 
     try:
         candidates = DATA_ROOT.iterdir()
         for path in candidates:
-            if not re.fullmatch(r"[a-z][a-z0-9_]*\.json\.\d+\.[0-9a-f]{32}\.tmp", path.name):
+            if not re.fullmatch(r"[a-z][a-z0-9_]*\.jsonl?\.\d+\.[0-9a-f]{32}\.tmp", path.name):
                 continue
             try:
                 stat = path.stat()
@@ -634,6 +636,13 @@ def data_disk_report() -> dict[str, Any]:
             files[name] = round(path.stat().st_size / 1024 / 1024, 3) if path.exists() else 0
         except OSError:
             files[name] = None
+    try:
+        files["analytics"] = round(
+            sum(path.stat().st_size for path in (ANALYTICS_FILE, analytics_log_path()) if path.exists()) / 1024 / 1024,
+            3,
+        )
+    except OSError:
+        files["analytics"] = None
     dirs = {
         "script_html_cache": round(dir_size_bytes(SCRIPT_HTML_CACHE_DIR) / 1024 / 1024, 3),
         "thumbnail_images": round(dir_size_bytes(THUMB_IMAGE_CACHE_DIR) / 1024 / 1024, 3),
@@ -2526,49 +2535,69 @@ def account_id_from_token(token: str) -> str:
     return account_id if hmac.compare_digest(signature, expected) else ""
 
 
+def accounts_file_signature() -> tuple[int, int]:
+    try:
+        stat = ACCOUNTS_FILE.stat()
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return 0, 0
+
+
 def load_accounts() -> list[dict[str, Any]]:
-    accounts = read_json_file(ACCOUNTS_FILE, [])
-    if not isinstance(accounts, list):
-        accounts = []
-    accounts, changed = migrate_account_replacements(accounts)
-    seen = {str(item.get("account_id") or "") for item in accounts if isinstance(item, dict)}
-    now = now_iso()
-    for account in accounts:
-        if not isinstance(account, dict):
-            continue
-        source = str(account.get("source") or "")
-        if not account.get("registration_status"):
-            account["registration_status"] = "registered" if source == "self_signup" or account.get("registered_at") else "unregistered"
-            changed = True
-        if account.get("registration_status") == "registered" and not account.get("registered_at"):
-            account["registered_at"] = str(account.get("created_at") or now)
-            changed = True
-        if account.get("registration_status") == "unregistered" and not account.get("provisioned_at"):
-            account["provisioned_at"] = str(account.get("created_at") or now)
-            changed = True
-    for key in DEFAULT_ALLOWED_ACCOUNTS:
-        account_id = normalize_account_key(key)
-        if account_id and account_id not in seen:
-            accounts.append({
-                "account_id": account_id,
-                "phone": account_id,
-                "display_name": account_id,
-                "status": "active",
-                "created_at": now,
-                "provisioned_at": now,
-                "registration_status": "unregistered",
-                "source": "seed",
-                "state": {},
-            })
-            seen.add(account_id)
-            changed = True
-    if changed:
-        write_json_atomic(ACCOUNTS_FILE, accounts[:5000])
-    return [item for item in accounts if isinstance(item, dict)]
+    with ACCOUNTS_CACHE_LOCK:
+        signature = accounts_file_signature()
+        if ACCOUNTS_CACHE.get("signature") == signature:
+            return list(ACCOUNTS_CACHE.get("accounts") or [])
+        accounts = read_json_file(ACCOUNTS_FILE, [])
+        if not isinstance(accounts, list):
+            accounts = []
+        accounts, changed = migrate_account_replacements(accounts)
+        seen = {str(item.get("account_id") or "") for item in accounts if isinstance(item, dict)}
+        now = now_iso()
+        for account in accounts:
+            if not isinstance(account, dict):
+                continue
+            source = str(account.get("source") or "")
+            if not account.get("registration_status"):
+                account["registration_status"] = "registered" if source == "self_signup" or account.get("registered_at") else "unregistered"
+                changed = True
+            if account.get("registration_status") == "registered" and not account.get("registered_at"):
+                account["registered_at"] = str(account.get("created_at") or now)
+                changed = True
+            if account.get("registration_status") == "unregistered" and not account.get("provisioned_at"):
+                account["provisioned_at"] = str(account.get("created_at") or now)
+                changed = True
+        for key in DEFAULT_ALLOWED_ACCOUNTS:
+            account_id = normalize_account_key(key)
+            if account_id and account_id not in seen:
+                accounts.append({
+                    "account_id": account_id,
+                    "phone": account_id,
+                    "display_name": account_id,
+                    "status": "active",
+                    "created_at": now,
+                    "provisioned_at": now,
+                    "registration_status": "unregistered",
+                    "source": "seed",
+                    "state": {},
+                })
+                seen.add(account_id)
+                changed = True
+        clean = [item for item in accounts[:5000] if isinstance(item, dict)]
+        if changed:
+            write_json_atomic(ACCOUNTS_FILE, clean)
+            signature = accounts_file_signature()
+        ACCOUNTS_CACHE["signature"] = signature
+        ACCOUNTS_CACHE["accounts"] = clean
+        return list(clean)
 
 
 def save_accounts(accounts: list[dict[str, Any]]) -> None:
-    write_json_atomic(ACCOUNTS_FILE, accounts[:5000])
+    clean = [item for item in accounts[:5000] if isinstance(item, dict)]
+    with ACCOUNTS_CACHE_LOCK:
+        write_json_atomic(ACCOUNTS_FILE, clean)
+        ACCOUNTS_CACHE["signature"] = accounts_file_signature()
+        ACCOUNTS_CACHE["accounts"] = clean
 
 
 def public_account(account: dict[str, Any], *, include_state: bool = False) -> dict[str, Any]:
@@ -2773,15 +2802,94 @@ def mark_account_registered(account_id: str, *, action: str = "login") -> dict[s
     return None
 
 
+def analytics_log_path() -> Path:
+    return ANALYTICS_FILE.with_suffix(".jsonl")
+
+
+def write_analytics_log_atomic(events: list[dict[str, Any]]) -> None:
+    path = analytics_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8") as handle:
+            for event in events:
+                if isinstance(event, dict):
+                    handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")))
+                    handle.write("\n")
+        temp_path.replace(path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def append_analytics_log(path: Path, events: list[dict[str, Any]]) -> None:
+    rows = [event for event in events if isinstance(event, dict)]
+    if not rows:
+        return
+    payload = "".join(
+        json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+        for event in rows
+    ).encode("utf-8")
+    with path.open("ab+") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() > 0:
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) != b"\n":
+                handle.seek(0, os.SEEK_END)
+                handle.write(b"\n")
+        handle.seek(0, os.SEEK_END)
+        handle.write(payload)
+
+
+def ensure_analytics_log() -> Path:
+    path = analytics_log_path()
+    with ANALYTICS_WRITE_LOCK:
+        if path.exists():
+            if ANALYTICS_FILE.exists():
+                try:
+                    ANALYTICS_FILE.unlink()
+                except OSError:
+                    pass
+            return path
+        legacy = read_json_file(ANALYTICS_FILE, [])
+        events = [item for item in legacy if isinstance(item, dict)] if isinstance(legacy, list) else []
+        write_analytics_log_atomic(events)
+        if ANALYTICS_FILE.exists():
+            try:
+                ANALYTICS_FILE.unlink()
+            except OSError:
+                pass
+        return path
+
+
 def load_analytics_events() -> list[dict[str, Any]]:
-    events = read_json_file(ANALYTICS_FILE, [])
-    if not isinstance(events, list):
-        return []
-    return [item for item in events if isinstance(item, dict)]
+    with ANALYTICS_WRITE_LOCK:
+        path = ensure_analytics_log()
+        events: list[dict[str, Any]] = []
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(item, dict):
+                        events.append(item)
+        except FileNotFoundError:
+            return []
+        return events
 
 
 def save_analytics_events(events: list[dict[str, Any]]) -> None:
-    write_json_atomic(ANALYTICS_FILE, events)
+    with ANALYTICS_WRITE_LOCK:
+        write_analytics_log_atomic(events)
+        if ANALYTICS_FILE.exists():
+            try:
+                ANALYTICS_FILE.unlink()
+            except OSError:
+                pass
 
 
 def analytics_visitor_id(headers: Any) -> str:
@@ -2837,9 +2945,8 @@ def persist_analytics_events(new_events: list[dict[str, Any]]) -> None:
     if not new_events:
         return
     with ANALYTICS_WRITE_LOCK:
-        events = load_analytics_events()
-        events.extend(new_events)
-        save_analytics_events(events)
+        path = ensure_analytics_log()
+        append_analytics_log(path, new_events)
 
 
 def append_analytics_event(
@@ -2850,7 +2957,7 @@ def append_analytics_event(
     visitor_id: str = "",
 ) -> dict[str, Any]:
     event = build_analytics_event(payload, headers, account=account, visitor_id=visitor_id)
-    persist_analytics_events([event])
+    enqueue_analytics_events([event])
     return event
 
 
@@ -5083,12 +5190,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
 
+class ResilientThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 128
+
+
 def main() -> int:
     try:
         DATA_ROOT.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
         print(f"data_root_init_failed path={DATA_ROOT!s} error={exc}", flush=True)
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server = ResilientThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(json.dumps({"port": PORT, "data_root": str(DATA_ROOT)}, ensure_ascii=False), flush=True)
     threading.Thread(target=analytics_writer_loop, name="creator-analytics-writer", daemon=True).start()
 
