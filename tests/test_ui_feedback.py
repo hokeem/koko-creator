@@ -27,6 +27,16 @@ class CreatorUiFeedbackTests(unittest.TestCase):
         self.assertIn('Carregando sua biblioteca...', self.markup)
         self.assertIn('Nao foi possivel sincronizar suas alteracoes.', self.markup)
 
+    def test_preference_completion_is_account_scoped(self) -> None:
+        self.assertIn('preferences_completed:preferencesCompleted', self.markup)
+        self.assertIn('preferencesCompleted=state.preferences_completed===true', self.markup)
+        self.assertIn('function hasProfile(){return preferencesCompleted}', self.markup)
+        self.assertIn('if(delta>0)finishProfile()', self.markup)
+
+    def test_new_account_can_open_preferences_before_kwai_profile(self) -> None:
+        self.assertIn('if(!hasProfile()||!accountNeedsProfile(creatorUser))', self.markup)
+        self.assertIn('v=creatorUser?"choose":"home"', self.markup)
+
 
 if __name__ == "__main__":
     unittest.main()
