@@ -37,6 +37,27 @@ class CreatorUiFeedbackTests(unittest.TestCase):
         self.assertIn('if(!hasProfile()||!accountNeedsProfile(creatorUser))', self.markup)
         self.assertIn('v=creatorUser?"choose":"home"', self.markup)
 
+    def test_onboarding_is_versioned_per_account(self) -> None:
+        self.assertIn('const CREATOR_ONBOARDING_VERSION=2', self.markup)
+        self.assertIn(
+            'Number(workspace.creatorOnboardingVersion||0)<CREATOR_ONBOARDING_VERSION',
+            self.markup,
+        )
+        self.assertIn(
+            'workspace.creatorOnboardingVersion=CREATOR_ONBOARDING_VERSION',
+            self.markup,
+        )
+
+    def test_full_script_failure_is_visible_and_retryable(self) -> None:
+        self.assertIn('if(!r.ok||!d.complete||!html.trim())', self.markup)
+        self.assertIn('data-retry-script=', self.markup)
+        self.assertIn('data-script-slot=', self.markup)
+        self.assertIn('Não mostramos uma versão resumida.', self.markup)
+
+    def test_script_details_are_not_artificially_truncated(self) -> None:
+        self.assertNotIn('return out.slice(0,6)', self.markup)
+        self.assertNotIn('d.segments.slice(0,9)', self.markup)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -113,6 +113,26 @@ class CacheReclamationTests(unittest.TestCase):
             self.assertEqual(result, (root / f"{entry_id}.html").read_text("utf-8"))
             self.assertFalse(list(root.glob("*.tmp")))
 
+    def test_script_html_retries_a_transient_fetch_failure(self) -> None:
+        entry_id = "b" * 32
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(app, "SCRIPT_HTML_CACHE_DIR", Path(temp_dir)),
+                patch.object(
+                    app,
+                    "fetch_text",
+                    side_effect=[OSError("temporary upstream failure"), "<p>Complete script</p>"],
+                ) as fetch,
+                patch.object(app, "reclaim_rebuildable_cache_space"),
+                patch.object(app.time, "sleep"),
+            ):
+                result = app.script_html_for_entry(
+                    {"entry_id": entry_id, "html_url": "https://example.com/script"}
+                )
+
+        self.assertIn("Complete script", result)
+        self.assertEqual(fetch.call_count, 2)
+
     def test_expired_video_source_is_refreshed_even_when_cache_cannot_write(self) -> None:
         entry_id = "a" * 32
         entry = {"entry_id": entry_id, "video_url": "https://www.kwai.com/@creator/video/123"}
