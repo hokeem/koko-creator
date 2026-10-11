@@ -58,6 +58,13 @@ class CreatorUiFeedbackTests(unittest.TestCase):
         self.assertNotIn('return out.slice(0,6)', self.markup)
         self.assertNotIn('d.segments.slice(0,9)', self.markup)
 
+    def test_profile_layout_wraps_mobile_content(self) -> None:
+        self.assertIn('class="profile-identity"', self.markup)
+        self.assertIn('class="submission-copy"', self.markup)
+        self.assertIn('.profile-prefs{display:flex!important;flex-wrap:wrap!important', self.markup)
+        self.assertIn('grid-template-columns:88px minmax(0,1fr)!important', self.markup)
+        self.assertIn('overflow-wrap:anywhere!important', self.markup)
+
 
 if __name__ == "__main__":
     unittest.main()
