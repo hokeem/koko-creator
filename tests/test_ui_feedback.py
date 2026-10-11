@@ -65,6 +65,11 @@ class CreatorUiFeedbackTests(unittest.TestCase):
         self.assertIn('grid-template-columns:88px minmax(0,1fr)!important', self.markup)
         self.assertIn('overflow-wrap:anywhere!important', self.markup)
 
+    def test_profile_gate_has_a_working_back_action(self) -> None:
+        self.assertIn('data-auth-back', self.markup)
+        self.assertIn('function returnFromProfileGate(button)', self.markup)
+        self.assertIn('back.classList.toggle("active",authMode==="profile")', self.markup)
+
 
 if __name__ == "__main__":
     unittest.main()
