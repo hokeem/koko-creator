@@ -39,6 +39,7 @@ class CreatorWorkspaceSelectionTests(unittest.TestCase):
         self.assertIn('Creator reward progress failed', self.markup)
         self.assertIn('Creator featured card failed', self.markup)
         self.assertIn('s&&typeof s==="object"', self.markup)
+        self.assertIn('using server-ranked recommendations', self.markup)
 
     def test_account_state_keeps_timestamp_only_for_saved_scripts(self) -> None:
         account = {"account_id": "creator-test", "state": {}}
