@@ -19,6 +19,15 @@ class CreatorWorkspaceSelectionTests(unittest.TestCase):
         self.assertIn('Mudar preferências', self.markup)
         self.assertNotIn('Suas preferências', self.markup[self.markup.index('function featuredCard'):self.markup.index('function stopFeaturedVideo')])
 
+    def test_featured_card_is_a_single_defensive_template(self) -> None:
+        start = self.markup.index('function featuredCard')
+        end = self.markup.index('function stopFeaturedVideo')
+        feature = self.markup[start:end]
+        self.assertEqual(feature.count('function featuredCard'), 1)
+        self.assertNotIn('originalFeaturedCard', feature)
+        self.assertNotIn('.replace(preferenceStripHtml()', feature)
+        self.assertIn('Optional creator card content failed', feature)
+
     def test_profile_defaults_to_saved_and_shows_selection_time(self) -> None:
         self.assertIn('let savedTab="saved"', self.markup)
         self.assertIn('selectionTimeLabel(id)', self.markup)
