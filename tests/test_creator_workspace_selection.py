@@ -36,6 +36,9 @@ class CreatorWorkspaceSelectionTests(unittest.TestCase):
         self.assertIn('let loaded=normalizeRecommendationEntries(d.entries)', self.markup)
         self.assertIn('data-retry-dashboard', self.markup)
         self.assertIn('Creator dashboard render failed', self.markup)
+        self.assertIn('Creator reward progress failed', self.markup)
+        self.assertIn('Creator featured card failed', self.markup)
+        self.assertIn('s&&typeof s==="object"', self.markup)
 
     def test_account_state_keeps_timestamp_only_for_saved_scripts(self) -> None:
         account = {"account_id": "creator-test", "state": {}}
