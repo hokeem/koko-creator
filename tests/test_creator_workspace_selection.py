@@ -30,6 +30,13 @@ class CreatorWorkspaceSelectionTests(unittest.TestCase):
         self.assertIn('workspace.selection_times[id]=new Date().toISOString()', self.markup)
         self.assertIn('persistAccountState(true)', self.markup)
 
+    def test_dashboard_filters_invalid_recommendations_and_exposes_retry(self) -> None:
+        self.assertIn('function normalizeRecommendationEntries(value)', self.markup)
+        self.assertIn('entries=normalizeRecommendationEntries(cached.entries)', self.markup)
+        self.assertIn('let loaded=normalizeRecommendationEntries(d.entries)', self.markup)
+        self.assertIn('data-retry-dashboard', self.markup)
+        self.assertIn('Creator dashboard render failed', self.markup)
+
     def test_account_state_keeps_timestamp_only_for_saved_scripts(self) -> None:
         account = {"account_id": "creator-test", "state": {}}
         workspace = {
