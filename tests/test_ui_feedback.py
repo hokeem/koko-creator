@@ -34,7 +34,7 @@ class CreatorUiFeedbackTests(unittest.TestCase):
         self.assertIn('if(delta>0)finishProfile()', self.markup)
 
     def test_new_account_can_open_preferences_before_kwai_profile(self) -> None:
-        self.assertIn('if(!hasProfile()||!accountNeedsProfile(creatorUser))', self.markup)
+        self.assertIn('if(isRepeatableTestAccount()||!hasProfile()||!accountNeedsProfile(creatorUser))', self.markup)
         self.assertIn('v=creatorUser?"choose":"home"', self.markup)
 
     def test_onboarding_is_versioned_per_account(self) -> None:
@@ -67,6 +67,14 @@ class CreatorUiFeedbackTests(unittest.TestCase):
 
     def test_profile_gate_has_a_working_back_action(self) -> None:
         self.assertIn('data-auth-back', self.markup)
+
+    def test_888_test_account_restarts_the_full_onboarding_flow(self) -> None:
+        self.assertIn('function isRepeatableTestAccount', self.markup)
+        self.assertIn('function resetRepeatableTestFlow', self.markup)
+        self.assertIn('isRepeatableTestAccount()?"choose"', self.markup)
+        self.assertIn('workspace.rewardGuideHidden&&!isRepeatableTestAccount()', self.markup)
+        self.assertIn('forceLocalOnboarding||isRepeatableTestAccount()', self.markup)
+        self.assertIn('!forceLocalOnboarding&&!isRepeatableTestAccount()', self.markup)
         self.assertIn('function returnFromProfileGate(button)', self.markup)
         self.assertIn('back.classList.toggle("active",authMode==="profile")', self.markup)
 
