@@ -2748,6 +2748,7 @@ def upsert_account(
     kwai_id: str = "",
     uid: str = "",
 ) -> dict[str, Any]:
+    registered_source = source in {"self_signup", "admin_created"}
     clean = canonical_account_key(account_id or phone or kwai_id or uid)
     if not clean:
         raise ValueError("账号只能包含数字、字母、下划线、@、点或短横线。")
@@ -2768,7 +2769,7 @@ def upsert_account(
             if uid_clean:
                 account["uid"] = uid_clean
             account["login_aliases"] = sorted(account_aliases(account).union(login_aliases))
-            if source == "self_signup":
+            if registered_source:
                 account["registration_status"] = "registered"
                 account["registered_at"] = str(account.get("registered_at") or now)
                 account["last_registered_at"] = now
@@ -2787,10 +2788,10 @@ def upsert_account(
         "display_name": display_name or clean,
         "status": "active",
         "created_at": now,
-        "provisioned_at": "" if source == "self_signup" else now,
-        "registration_status": "registered" if source == "self_signup" else "unregistered",
-        "registered_at": now if source == "self_signup" else "",
-        "last_registered_at": now if source == "self_signup" else "",
+        "provisioned_at": "" if registered_source else now,
+        "registration_status": "registered" if registered_source else "unregistered",
+        "registered_at": now if registered_source else "",
+        "last_registered_at": now if registered_source else "",
         "updated_at": now,
         "source": source,
         "state": {},
@@ -5073,8 +5074,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 payload = self.read_body()
+                activate = str(payload.get("activate") or "").strip().lower() in {"1", "true", "yes", "on"}
                 account = upsert_account(
                     str(payload.get("account") or payload.get("phone") or payload.get("account_id") or ""),
+                    source="admin_created" if activate else "admin",
                     display_name=str(payload.get("display_name") or ""),
                     phone=str(payload.get("phone") or ""),
                     kwai_id=str(payload.get("kwai_id") or ""),
