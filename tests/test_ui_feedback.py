@@ -65,6 +65,17 @@ class CreatorUiFeedbackTests(unittest.TestCase):
         self.assertIn('grid-template-columns:88px minmax(0,1fr)!important', self.markup)
         self.assertIn('overflow-wrap:anywhere!important', self.markup)
 
+    def test_wallet_is_grouped_with_saved_profile_navigation(self) -> None:
+        schedule_position = self.markup.index('data-tab-jump="schedule"')
+        saved_position = self.markup.index('data-tab-jump="saved"')
+        wallet_position = self.markup.index('data-tab-jump="wallet"')
+        self.assertLess(schedule_position, saved_position)
+        self.assertLess(saved_position, wallet_position)
+        self.assertIn('.profile-card-strip{grid-template-columns:repeat(2,minmax(0,1fr))!important}', self.markup)
+        self.assertIn('if(savedTab==="wallet"){renderCreatorWallet();return}', self.markup)
+        self.assertNotIn('feed.insertAdjacentHTML("afterend"', self.markup)
+        self.assertIn('`Estimativa dos bônus de ${esc(estimate.monthLabel)}`', self.markup)
+
     def test_profile_gate_has_a_working_back_action(self) -> None:
         self.assertIn('data-auth-back', self.markup)
 
