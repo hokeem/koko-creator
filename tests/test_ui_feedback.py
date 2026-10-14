@@ -76,6 +76,16 @@ class CreatorUiFeedbackTests(unittest.TestCase):
         self.assertIn('renderCreatorWallet=function(){if(savedTab!=="wallet")return;', self.markup)
         self.assertIn('`Estimativa dos bônus de ${esc(estimate.monthLabel)}`', self.markup)
 
+    def test_profile_actions_and_four_tabs_have_non_overlapping_responsive_layout(self) -> None:
+        self.assertIn('.profile-row{display:grid!important;grid-template-columns:52px minmax(0,1fr)!important', self.markup)
+        self.assertIn('.profile-row .profile-tools{grid-column:1/-1!important;grid-row:2!important', self.markup)
+        self.assertIn('.profile-card-strip{margin:22px 0 18px!important', self.markup)
+
+    def test_every_profile_tab_uses_the_same_navigation_handler(self) -> None:
+        self.assertIn('const nav=event.target.closest(".profile-card-strip [data-tab-jump]")', self.markup)
+        self.assertIn('if(!["saved","finished","schedule","wallet"].includes(next))return;savedTab=next;show("saved")', self.markup)
+        self.assertNotIn('savedTab="saved";show("saved");setTimeout(()=>document.querySelector("#creator-wallet")', self.markup)
+
     def test_profile_gate_has_a_working_back_action(self) -> None:
         self.assertIn('data-auth-back', self.markup)
 
