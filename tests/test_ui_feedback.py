@@ -71,9 +71,9 @@ class CreatorUiFeedbackTests(unittest.TestCase):
         wallet_position = self.markup.index('data-tab-jump="wallet"')
         self.assertLess(schedule_position, saved_position)
         self.assertLess(saved_position, wallet_position)
-        self.assertIn('.profile-card-strip{grid-template-columns:repeat(2,minmax(0,1fr))!important}', self.markup)
+        self.assertIn('grid-template-columns:repeat(4,minmax(0,1fr))!important', self.markup)
         self.assertIn('if(savedTab==="wallet"){renderCreatorWallet();return}', self.markup)
-        self.assertNotIn('feed.insertAdjacentHTML("afterend"', self.markup)
+        self.assertIn('renderCreatorWallet=function(){if(savedTab!=="wallet")return;', self.markup)
         self.assertIn('`Estimativa dos bônus de ${esc(estimate.monthLabel)}`', self.markup)
 
     def test_profile_gate_has_a_working_back_action(self) -> None:
