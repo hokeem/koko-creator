@@ -5109,6 +5109,9 @@ class Handler(BaseHTTPRequestHandler):
             if not account_id or not password:
                 self.send_json({"error": login_error}, status=401)
                 return
+            if not auth_rate_allowed("login", f"{client_ip(self.headers)}:{account_id}", limit=20, window=900):
+                self.send_json({"error": "Muitas tentativas. Aguarde 15 minutos e tente novamente."}, status=429)
+                return
             account = find_account(account_id)
             if not account:
                 self.send_json({"error": login_error}, status=401)

@@ -66,6 +66,14 @@ class PublicSignupTests(unittest.TestCase):
         self.assertFalse(profile["profile_found"])
         self.assertFalse(profile["bio"])
 
+    def test_login_attempts_are_limited_per_account_and_source(self) -> None:
+        app.AUTH_ATTEMPTS.clear()
+        self.assertTrue(app.auth_rate_allowed("login", "test-ip:account-a", limit=2, window=900))
+        self.assertTrue(app.auth_rate_allowed("login", "test-ip:account-a", limit=2, window=900))
+        self.assertFalse(app.auth_rate_allowed("login", "test-ip:account-a", limit=2, window=900))
+        self.assertTrue(app.auth_rate_allowed("login", "test-ip:account-b", limit=2, window=900))
+        app.AUTH_ATTEMPTS.clear()
+
 
 if __name__ == "__main__":
     unittest.main()
