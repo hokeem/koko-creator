@@ -73,7 +73,7 @@ class CreatorUiFeedbackTests(unittest.TestCase):
         self.assertLess(saved_position, wallet_position)
         self.assertIn('grid-template-columns:repeat(4,minmax(0,1fr))!important', self.markup)
         self.assertIn('if(savedTab==="wallet"){renderCreatorWallet();return}', self.markup)
-        self.assertIn('renderCreatorWallet=function(){if(savedTab!=="wallet")return;', self.markup)
+        self.assertIn('renderCreatorWallet=function(){if(savedTab!=="wallet"){document.querySelector("#creator-wallet")?.remove();return}', self.markup)
         self.assertIn('`Estimativa dos bônus de ${esc(estimate.monthLabel)}`', self.markup)
 
     def test_profile_actions_and_four_tabs_have_non_overlapping_responsive_layout(self) -> None:
@@ -82,8 +82,12 @@ class CreatorUiFeedbackTests(unittest.TestCase):
         self.assertIn('.profile-card-strip{margin:22px 0 18px!important', self.markup)
 
     def test_every_profile_tab_uses_the_same_navigation_handler(self) -> None:
-        self.assertIn('const nav=event.target.closest(".profile-card-strip [data-tab-jump]")', self.markup)
-        self.assertIn('if(!["saved","finished","schedule","wallet"].includes(next))return;savedTab=next;show("saved")', self.markup)
+        self.assertIn('document.querySelector(".profile-card-strip")?.addEventListener("click"', self.markup)
+        self.assertIn('savedTab=next;document.querySelectorAll(".profile-card-strip [data-tab-jump]")', self.markup)
+        self.assertIn('item.setAttribute("aria-pressed",String(active))', self.markup)
+        self.assertIn('key==="schedule"?\' id="schedule-mini-label"\':""', self.markup)
+        self.assertIn('const scheduleLabel=document.querySelector("#schedule-mini-label");if(scheduleLabel)scheduleLabel.textContent', self.markup)
+        self.assertIn('if(savedTab!=="wallet"){document.querySelector("#creator-wallet")?.remove();return}', self.markup)
         self.assertNotIn('savedTab="saved";show("saved");setTimeout(()=>document.querySelector("#creator-wallet")', self.markup)
 
     def test_profile_gate_has_a_working_back_action(self) -> None:
