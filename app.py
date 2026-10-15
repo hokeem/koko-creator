@@ -110,6 +110,9 @@ ANALYTICS_WRITE_LOCK = threading.RLock()
 ANALYTICS_EVENT_QUEUE: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=4096)
 ACCOUNTS_CACHE_LOCK = threading.RLock()
 ACCOUNTS_CACHE: dict[str, Any] = {"signature": None, "accounts": []}
+SIGNUP_LOCK = threading.RLock()
+AUTH_RATE_LOCK = threading.Lock()
+AUTH_ATTEMPTS: dict[str, list[float]] = {}
 
 
 QUESTIONS = [
@@ -2733,10 +2736,39 @@ def creator_password_candidates(account: dict[str, Any], login_id: str) -> set[s
 
 
 def valid_creator_login_password(account: dict[str, Any], login_id: str, password: str) -> bool:
-    supplied = str(password or "").strip()
+    supplied = str(password or "")
     if not supplied:
         return False
+    stored = str(account.get("password_hash") or "")
+    if stored:
+        try:
+            algorithm, salt_hex, digest_hex = stored.split("$", 2)
+            if algorithm != "pbkdf2_sha256":
+                return False
+            actual = hashlib.pbkdf2_hmac("sha256", supplied.encode("utf-8"), bytes.fromhex(salt_hex), 310000)
+            return hmac.compare_digest(actual, bytes.fromhex(digest_hex))
+        except (ValueError, TypeError):
+            return False
     return any(secrets.compare_digest(supplied, allowed) for allowed in creator_password_candidates(account, login_id))
+
+
+def hash_creator_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 310000)
+    return f"pbkdf2_sha256${salt.hex()}${digest.hex()}"
+
+
+def auth_rate_allowed(action: str, ip: str, *, limit: int, window: int) -> bool:
+    key = f"{action}:{ip or 'unknown'}"
+    now = time.monotonic()
+    with AUTH_RATE_LOCK:
+        attempts = [stamp for stamp in AUTH_ATTEMPTS.get(key, []) if now - stamp < window]
+        if len(attempts) >= limit:
+            AUTH_ATTEMPTS[key] = attempts
+            return False
+        attempts.append(now)
+        AUTH_ATTEMPTS[key] = attempts
+        return True
 
 
 def upsert_account(
@@ -3649,6 +3681,97 @@ def normalize_kwai_url(url: str) -> str:
     return text
 
 
+def signup_kwai_profile_url(value: str) -> tuple[str, str]:
+    parsed = urllib.parse.urlparse(normalize_kwai_url(value))
+    if parsed.scheme != "https" or parsed.hostname not in {"kwai.com", "www.kwai.com", "m.kwai.com"} or parsed.port not in {None, 443} or parsed.username or parsed.password:
+        raise ValueError("Informe o link HTTPS do seu perfil no Kwai.")
+    match = re.fullmatch(r"/@([A-Za-z0-9_.-]{2,120})/?", parsed.path)
+    if not match:
+        raise ValueError("Use o link do perfil, por exemplo https://www.kwai.com/@seu_id.")
+    handle = normalize_kwai_id(match.group(1))
+    return f"https://www.kwai.com/@{handle}", handle
+
+
+def register_public_creator(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    phone = normalize_phone(str(payload.get("phone") or ""))
+    password = str(payload.get("password") or "")
+    if not 10 <= len(phone) <= 15:
+        raise ValueError("Informe um telefone válido com DDD.")
+    if len(password) < 8 or len(password) > 128 or password != password.strip():
+        raise ValueError("Crie uma senha de 8 a 128 caracteres.")
+    kwai_url, kwai_id = signup_kwai_profile_url(str(payload.get("kwai_url") or ""))
+    with SIGNUP_LOCK, ACCOUNTS_CACHE_LOCK:
+        accounts = load_accounts()
+        profiles = load_creator_profiles()
+        if any(phone in account_aliases(item) for item in accounts):
+            raise FileExistsError("Este telefone já tem uma conta. Entre com a senha existente.")
+        if any(kwai_id in account_aliases(item) for item in accounts) or any(
+            normalize_kwai_id(item.get("kwai_id") or kwai_handle_from_url(str(item.get("kwai_url") or ""))) == kwai_id
+            for item in profiles
+        ):
+            raise FileExistsError("Este perfil Kwai já está vinculado a outra conta.")
+        if len(profiles) >= 2000 or len(accounts) >= 5000:
+            raise RuntimeError("Cadastro temporariamente indisponível. Tente novamente mais tarde.")
+        now = now_iso()
+        account = {
+            "account_id": phone, "phone": phone, "kwai_id": kwai_id, "uid": "",
+            "login_aliases": [phone, kwai_id], "display_name": kwai_id,
+            "password_hash": hash_creator_password(password), "status": "active",
+            "source": "self_signup", "registration_status": "registered",
+            "created_at": now, "registered_at": now, "last_registered_at": now,
+            "last_login_at": now, "updated_at": now, "state": {},
+        }
+        profile = {
+            "profile_id": uuid4().hex, "account_id": phone, "phone": phone,
+            "kwai_id": kwai_id, "uid": "", "kwai_url": kwai_url,
+            "name": kwai_id, "avatar_url": "", "followers": "", "bio": "",
+            "poc": "", "categories": [], "creator_type": {},
+            "cooperation_level": "待标注", "creator_description": "", "notes": "",
+            "profile_sync_status": "pending", "created_at": now, "updated_at": now,
+        }
+        save_creator_profiles([profile, *profiles])
+        try:
+            save_accounts([account, *accounts])
+        except Exception:
+            save_creator_profiles(profiles)
+            raise
+    return account, profile
+
+
+def enrich_public_creator_profile(profile_id: str, kwai_url: str) -> None:
+    try:
+        fetched = fetch_kwai_profile(kwai_url, timeout=8)
+        status = "ready" if fetched.get("profile_found") else "unavailable"
+    except Exception:
+        fetched, status = {}, "unavailable"
+    with SIGNUP_LOCK:
+        profiles = load_creator_profiles()
+        for index, profile in enumerate(profiles):
+            if str(profile.get("profile_id") or "") != profile_id or str(profile.get("kwai_url") or "") != kwai_url:
+                continue
+            profile = dict(profile)
+            if fetched.get("name") and profile.get("name") == profile.get("kwai_id"):
+                profile["name"] = fetched["name"]
+            for field in ("avatar_url", "followers", "bio"):
+                if fetched.get(field):
+                    profile[field] = fetched[field]
+            profile["profile_sync_status"] = status
+            profile["profile_sync_checked_at"] = now_iso()
+            profile["updated_at"] = now_iso()
+            profiles[index] = profile
+            save_creator_profiles(profiles)
+            if fetched.get("name") and fetched["name"] != profile.get("kwai_id"):
+                with ACCOUNTS_CACHE_LOCK:
+                    accounts = load_accounts()
+                    for account in accounts:
+                        if account.get("account_id") == profile.get("account_id") and account.get("display_name") == profile.get("kwai_id"):
+                            account["display_name"] = fetched["name"]
+                            account["updated_at"] = now_iso()
+                            save_accounts(accounts)
+                            break
+            break
+
+
 def kwai_handle_from_url(url: str) -> str:
     path = urllib.parse.urlparse(normalize_kwai_url(url)).path
     match = re.search(r"/@([^/?#]+)", path)
@@ -3661,11 +3784,11 @@ def meta_content(html_text: str, key: str) -> str:
     return html.unescape(match.group(1).strip()) if match else ""
 
 
-def fetch_kwai_profile(url: str) -> dict[str, Any]:
+def fetch_kwai_profile(url: str, timeout: int = 24) -> dict[str, Any]:
     profile_url = normalize_kwai_url(url)
     if "kwai.com/" not in profile_url:
         raise ValueError("请输入 Kwai 作者主页链接。")
-    html_text = fetch_text(profile_url, timeout=24)
+    html_text = fetch_text(profile_url, timeout=timeout)
     title = meta_content(html_text, "og:title") or meta_content(html_text, "twitter:title")
     if not title:
         match = re.search(r"<title[^>]*>(.*?)</title>", html_text, re.I | re.S)
@@ -3676,10 +3799,12 @@ def fetch_kwai_profile(url: str) -> dict[str, Any]:
     if title_match:
         name = title_match.group(1).strip()
         handle = handle or title_match.group(2).strip()
-    else:
-        name = re.sub(r"\s*\(@.*?\)\s+on\s+Kwai.*$", "", title).strip()
     avatar = meta_content(html_text, "og:image") or meta_content(html_text, "twitter:image")
-    description = meta_content(html_text, "og:description") or meta_content(html_text, "twitter:description")
+    if avatar.startswith("http://") and urllib.parse.urlparse(avatar).hostname in {"aws-br-pic.kwai.net", "p1.a.yximgs.com"}:
+        avatar = "https://" + avatar.removeprefix("http://")
+    description = (meta_content(html_text, "og:description") or meta_content(html_text, "twitter:description")) if title_match else ""
+    if not title_match:
+        avatar = ""
     follower_count = ""
     for pattern in [
         r'"(?:followerCount|followers|fanCount|fans)"\s*:\s*"?([\d,.万wkKmM]+)"?',
@@ -3687,7 +3812,7 @@ def fetch_kwai_profile(url: str) -> dict[str, Any]:
         r'([\d,.]+)\s*(?:Seguidores|seguidores)',
     ]:
         match = re.search(pattern, html_text, re.I)
-        if match:
+        if match and re.search(r"\d", match.group(1)):
             follower_count = match.group(1).strip()
             break
     return {
@@ -3697,6 +3822,7 @@ def fetch_kwai_profile(url: str) -> dict[str, Any]:
         "avatar_url": avatar,
         "followers": follower_count,
         "bio": description,
+        "profile_found": bool(title_match),
         "fetched_at": now_iso(),
     }
 
@@ -4569,7 +4695,7 @@ document.querySelector("#auth-form").addEventListener("submit",handleAuthSubmit)
 document.querySelector("#profile-avatar-input")?.addEventListener("change",e=>handleProfileImage("avatar",e.target.files?.[0]));
 document.querySelector("#profile-cover-input")?.addEventListener("change",e=>handleProfileImage("cover",e.target.files?.[0]));
 async function bootstrap(){{if(creatorUser){{await loadAccountState();resetRepeatableTestFlow()}}applyLang();setAuthMode("login");show(isRepeatableTestAccount()?"choose":forceLanding?"home":initialScriptId?"dashboard":creatorUser&&hasProfile()?"dashboard":"home");track("page_view",{{source:initialScriptId?"share_script":"portal"}});if(initialScriptId&&!isRepeatableTestAccount()){{openDetail(initialScriptId);if(!creatorUser)setTimeout(()=>openAuth("login"),260)}}if(creatorUser&&!isRepeatableTestAccount())setTimeout(()=>requireKwaiProfile(initialScriptId?"share_script_open":"portal_open"),180)}}bootstrap();
-</script></body></html>"""
+</script><link rel="stylesheet" href="/static/public-signup.css"><script src="/static/public-signup.js"></script></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -5013,25 +5139,48 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
             return
         if parsed.path == "/api/auth/register":
+            if not auth_rate_allowed("register", client_ip(self.headers), limit=60, window=3600):
+                self.send_json({"error": "Muitas tentativas. Aguarde um pouco e tente novamente."}, status=429)
+                return
+            if int(self.headers.get("Content-Length", "0") or "0") > 4096:
+                self.send_json({"error": "Dados de cadastro muito grandes."}, status=413)
+                return
             try:
                 payload = self.read_body()
             except Exception:
-                payload = {}
+                self.send_json({"error": "Dados de cadastro inválidos."}, status=400)
+                return
             try:
-                application = save_access_application(payload, self.headers)
-            except Exception as exc:
+                account, profile = register_public_creator(payload)
+            except FileExistsError as exc:
+                self.send_json({"error": str(exc)}, status=409)
+                return
+            except ValueError as exc:
                 self.send_json({"error": str(exc)}, status=400)
+                return
+            except Exception:
+                self.send_json({"error": "Cadastro indisponível. Tente novamente em instantes."}, status=503)
                 return
             append_analytics_event(
                 {
-                    "event": "access_application_created",
+                    "event": "self_signup",
                     "page_type": "auth",
                     "path": parsed.path,
-                    "meta": {"phone": application.get("phone"), "kwai_id": application.get("kwai_id")},
+                    "meta": {"kwai_id": profile.get("kwai_id")},
                 },
                 self.headers,
+                account=account,
             )
-            self.send_json({"ok": True, "application": application}, status=201)
+            threading.Thread(
+                target=enrich_public_creator_profile,
+                args=(str(profile["profile_id"]), str(profile["kwai_url"])),
+                daemon=True,
+            ).start()
+            self.send_json(
+                {"ok": True, "account": public_account(account), "profile_sync_status": "pending"},
+                status=201,
+                headers=[("Set-Cookie", f"{CREATOR_AUTH_COOKIE}={urllib.parse.quote(make_account_token(str(account['account_id'])))}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax")],
+            )
             return
         if parsed.path == "/api/auth/logout":
             self.send_json({"ok": True}, headers=[("Set-Cookie", f"{CREATOR_AUTH_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")])

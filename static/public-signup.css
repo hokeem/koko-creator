@@ -1,0 +1,9 @@
+.auth-overlay { overflow-y: auto; }
+.auth-card { min-height: 0; max-height: calc(100dvh - 44px); overflow-y: auto; }
+.auth-card input[hidden], .auth-card textarea[hidden] { display: none !important; }
+.auth-card #auth-register-password { margin-bottom: 12px; }
+@media (max-width: 420px) {
+  .auth-overlay { padding: 12px; }
+  .auth-card { width: 100%; padding: 28px 20px; max-height: calc(100dvh - 24px); }
+  .auth-card h2 { font-size: 28px; margin-bottom: 18px; }
+}
