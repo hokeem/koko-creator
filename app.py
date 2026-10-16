@@ -3683,13 +3683,101 @@ def normalize_kwai_url(url: str) -> str:
 
 def signup_kwai_profile_url(value: str) -> tuple[str, str]:
     parsed = urllib.parse.urlparse(normalize_kwai_url(value))
-    if parsed.scheme != "https" or parsed.hostname not in {"kwai.com", "www.kwai.com", "m.kwai.com"} or parsed.port not in {None, 443} or parsed.username or parsed.password:
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Informe o link HTTPS do seu perfil no Kwai.") from exc
+    if parsed.scheme != "https" or parsed.hostname not in {"kwai.com", "www.kwai.com", "m.kwai.com"} or port not in {None, 443} or parsed.username or parsed.password:
         raise ValueError("Informe o link HTTPS do seu perfil no Kwai.")
     match = re.fullmatch(r"/@([A-Za-z0-9_.-]{2,120})/?", parsed.path)
     if not match:
         raise ValueError("Use o link do perfil, por exemplo https://www.kwai.com/@seu_id.")
     handle = normalize_kwai_id(match.group(1))
     return f"https://www.kwai.com/@{handle}", handle
+
+
+def enter_by_kwai_profile(value: str) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    kwai_url, kwai_id = signup_kwai_profile_url(value)
+    normalized_handle = kwai_id.casefold()
+    with SIGNUP_LOCK, ACCOUNTS_CACHE_LOCK:
+        accounts = load_accounts()
+        profiles = load_creator_profiles()
+        original_profiles = list(profiles)
+        profile_matches = [
+            profile for profile in profiles
+            if normalize_kwai_id(profile.get("kwai_id") or kwai_handle_from_url(str(profile.get("kwai_url") or ""))).casefold() == normalized_handle
+        ]
+        account_matches = [
+            account for account in accounts
+            if normalize_kwai_id(account.get("kwai_id") or "").casefold() == normalized_handle
+        ]
+        linked_ids = {
+            canonical_account_key(str(value))
+            for profile in profile_matches
+            for value in (profile.get("account_id"), profile.get("phone"), profile.get("uid"))
+            if value
+        }
+        linked_ids.discard("")
+        candidates = [account for account in accounts if account_aliases(account).intersection(linked_ids)]
+        candidates.extend(account for account in account_matches if account not in candidates)
+        if len({str(account.get("account_id") or "") for account in candidates}) > 1:
+            raise FileExistsError("Este perfil tem mais de um cadastro. Fale com a equipe Koko para corrigir o vínculo.")
+        account = candidates[0] if candidates else None
+        if account and str(account.get("status") or "active") != "active":
+            raise PermissionError("Este acesso está desativado. Fale com a equipe Koko.")
+        now = now_iso()
+        created = account is None
+        if not account:
+            if len(accounts) >= 5000 or len(profiles) >= 2000:
+                raise RuntimeError("Acesso temporariamente indisponível. Tente novamente mais tarde.")
+            account_id = canonical_account_key(str((profile_matches[0].get("account_id") or profile_matches[0].get("phone")) if profile_matches else "")) or f"kwai_{uuid4().hex}"
+            account = {
+                "account_id": account_id, "phone": "", "kwai_id": kwai_id, "uid": "",
+                "login_aliases": [kwai_id], "display_name": kwai_id,
+                "status": "active", "source": "kwai_link_entry", "registration_status": "registered",
+                "created_at": now, "registered_at": now, "last_registered_at": now,
+                "first_seen_at": now, "last_login_at": now, "updated_at": now, "state": {},
+            }
+            accounts.insert(0, account)
+        else:
+            account = dict(account)
+            account["kwai_id"] = account.get("kwai_id") or kwai_id
+            account["login_aliases"] = sorted(set(account.get("login_aliases") or []).union({kwai_id}))
+            account["registration_status"] = "registered"
+            account["registered_at"] = str(account.get("registered_at") or now)
+            account["first_seen_at"] = str(account.get("first_seen_at") or now)
+            account["last_login_at"] = now
+            account["updated_at"] = now
+            accounts[accounts.index(candidates[0])] = account
+        linked_profiles = [
+            item for item in profiles
+            if str(item.get("account_id") or "") == str(account["account_id"])
+        ]
+        matched_profile = profile_matches[0] if profile_matches else (linked_profiles[0] if linked_profiles else None)
+        if matched_profile:
+            profile = dict(matched_profile)
+            profile["account_id"] = str(account["account_id"])
+            profile["kwai_id"] = profile.get("kwai_id") or kwai_id
+            profile["kwai_url"] = profile.get("kwai_url") or kwai_url
+            profile["updated_at"] = now
+            profiles[profiles.index(matched_profile)] = profile
+        else:
+            profile = {
+                "profile_id": uuid4().hex, "account_id": str(account["account_id"]),
+                "phone": str(account.get("phone") or ""), "kwai_id": kwai_id, "uid": str(account.get("uid") or ""),
+                "kwai_url": kwai_url, "name": str(account.get("display_name") or kwai_id),
+                "avatar_url": "", "followers": "", "bio": "", "poc": "", "categories": [],
+                "creator_type": {}, "cooperation_level": "待标注", "creator_description": "",
+                "notes": "", "profile_sync_status": "pending", "created_at": now, "updated_at": now,
+            }
+            profiles.insert(0, profile)
+        save_creator_profiles(profiles)
+        try:
+            save_accounts(accounts)
+        except Exception:
+            save_creator_profiles(original_profiles)
+            raise
+    return account, profile, created
 
 
 def register_public_creator(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -4407,7 +4495,7 @@ def page_html() -> str:
 .script-load-error span{{display:block;line-height:1.55}}.script-load-error button{{width:100%;margin-top:14px;min-height:44px}}
 </style></head><body><main class="phone"><header class="top"><div class="brand">kwai <span>Koko</span></div></header>
 
-<section class="view landing" data-view="home"><h1>Encontre roteiros que você consegue gravar</h1><p class="lead">Receba recomendações com base no seu perfil de criação, formatos que combinam com você e roteiros prontos para gravar.</p><div class="hero"><img class="mascot" src="/static/koko-creator-mascot-cutout.png" alt="Koko Creator"></div><div class="cta"><button class="primary" type="button" data-auth-open="login">Entrar com telefone</button><button class="landing-register" type="button" data-auth-open="register">Solicitar acesso</button></div><section class="landing-section"><h2>Veja antes de escolher</h2><div class="preview-strip"><div class="preview-card"><span>Preview do roteiro</span></div><div class="preview-card"><span>Referência em vídeo</span></div><div class="preview-card"><span>Estrutura de gravação</span></div></div></section><section class="landing-section"><div class="feature-row"><div class="feature"><b>1</b>Escolha seu perfil</div><div class="feature"><b>2</b>Veja recomendações</div><div class="feature"><b>3</b>Grave e envie</div></div></section><section class="landing-section"><h2>Criadores parceiros</h2><div class="author-cloud"><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span></div><div class="info-panel">Já trabalhamos com muitos grandes criadores da plataforma Kwai. Vídeos gravados a partir dos roteiros da Koko tiveram desempenho acima da média de visualizações dos próprios criadores, e em alguns casos ajudaram a aumentar a renda em até 200%.</div></section><section class="landing-section ending-card"><div>Pronto para começar a gravar com a Koko?<small>Entre com seu telefone, escolha suas preferências uma vez e volte todos os dias para ver novos roteiros.</small><br><button class="primary" type="button" data-auth-open="login">Entrar agora</button></div></section></section>
+<section class="view landing" data-view="home"><h1>Encontre roteiros que você consegue gravar</h1><p class="lead">Receba recomendações com base no seu perfil de criação, formatos que combinam com você e roteiros prontos para gravar.</p><div class="hero"><img class="mascot" src="/static/koko-creator-mascot-cutout.png" alt="Koko Creator"></div><div class="cta"><button class="primary" type="button" data-auth-open="login">Entrar com meu perfil Kwai</button></div><section class="landing-section"><h2>Veja antes de escolher</h2><div class="preview-strip"><div class="preview-card"><span>Preview do roteiro</span></div><div class="preview-card"><span>Referência em vídeo</span></div><div class="preview-card"><span>Estrutura de gravação</span></div></div></section><section class="landing-section"><div class="feature-row"><div class="feature"><b>1</b>Escolha seu perfil</div><div class="feature"><b>2</b>Veja recomendações</div><div class="feature"><b>3</b>Grave e envie</div></div></section><section class="landing-section"><h2>Criadores parceiros</h2><div class="author-cloud"><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span><span class="author-dot"></span></div><div class="info-panel">Já trabalhamos com muitos grandes criadores da plataforma Kwai. Vídeos gravados a partir dos roteiros da Koko tiveram desempenho acima da média de visualizações dos próprios criadores, e em alguns casos ajudaram a aumentar a renda em até 200%.</div></section><section class="landing-section ending-card"><div>Pronto para começar a gravar com a Koko?<small>Cole o link do seu perfil Kwai, escolha suas preferências e encontre roteiros para gravar.</small><br><button class="primary" type="button" data-auth-open="login">Entrar com meu Kwai</button></div></section></section>
 <section class="view" data-view="dashboard"><div id="dashboard-feed"></div></section>
 <section class="view" data-view="missions"><div id="mission-feed"></div></section>
 <section class="view" data-view="all-scripts"><div class="all-title-row"><button class="back-pill" type="button" data-go="dashboard">←</button><h1 id="all-title">Todos os roteiros</h1></div><div id="all-feed"></div></section>
@@ -4695,7 +4783,7 @@ document.querySelector("#auth-form").addEventListener("submit",handleAuthSubmit)
 document.querySelector("#profile-avatar-input")?.addEventListener("change",e=>handleProfileImage("avatar",e.target.files?.[0]));
 document.querySelector("#profile-cover-input")?.addEventListener("change",e=>handleProfileImage("cover",e.target.files?.[0]));
 async function bootstrap(){{if(creatorUser){{await loadAccountState();resetRepeatableTestFlow()}}applyLang();setAuthMode("login");show(isRepeatableTestAccount()?"choose":forceLanding?"home":initialScriptId?"dashboard":creatorUser&&hasProfile()?"dashboard":"home");track("page_view",{{source:initialScriptId?"share_script":"portal"}});if(initialScriptId&&!isRepeatableTestAccount()){{openDetail(initialScriptId);if(!creatorUser)setTimeout(()=>openAuth("login"),260)}}if(creatorUser&&!isRepeatableTestAccount())setTimeout(()=>requireKwaiProfile(initialScriptId?"share_script_open":"portal_open"),180)}}bootstrap();
-</script><link rel="stylesheet" href="/static/public-signup.css"><script src="/static/public-signup.js"></script></body></html>"""
+</script><link rel="stylesheet" href="/static/public-signup.css?v=kwai-link-1"><script src="/static/public-signup.js?v=kwai-link-1"></script></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -5095,6 +5183,49 @@ class Handler(BaseHTTPRequestHandler):
                 {"ok": True, "event_id": event.get("event_id")},
                 status=201,
                 headers=[("Set-Cookie", f"{VISITOR_COOKIE}={urllib.parse.quote(visitor_id)}; Path=/; Max-Age=31536000; SameSite=Lax")],
+            )
+            return
+        if parsed.path == "/api/auth/kwai-link":
+            if not auth_rate_allowed("kwai_link", client_ip(self.headers), limit=40, window=3600):
+                self.send_json({"error": "Muitas tentativas. Aguarde um pouco e tente novamente."}, status=429)
+                return
+            if int(self.headers.get("Content-Length", "0") or "0") > 2048:
+                self.send_json({"error": "Link muito longo."}, status=413)
+                return
+            try:
+                payload = self.read_body()
+                account, profile, created = enter_by_kwai_profile(str(payload.get("kwai_url") or ""))
+            except (ValueError, FileExistsError) as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            except PermissionError as exc:
+                self.send_json({"error": str(exc)}, status=403)
+                return
+            except Exception:
+                self.send_json({"error": "Não foi possível entrar agora. Tente novamente em instantes."}, status=503)
+                return
+            append_analytics_event(
+                {"event": "login", "page_type": "auth", "path": parsed.path, "meta": {"method": "kwai_profile_link"}},
+                self.headers, account=account,
+            )
+            if created:
+                append_analytics_event(
+                    {"event": "self_signup", "page_type": "auth", "path": parsed.path, "meta": {"kwai_id": profile.get("kwai_id")}},
+                    self.headers, account=account,
+                )
+            record_login_referer_open(self.headers, account)
+            if not profile.get("avatar_url") and profile.get("profile_sync_status") != "ready":
+                threading.Thread(
+                    target=enrich_public_creator_profile,
+                    args=(str(profile["profile_id"]), str(profile["kwai_url"])),
+                    daemon=True,
+                ).start()
+            public = public_account(account, include_state=True)
+            self.send_json(
+                {"ok": True, "account": {key: value for key, value in public.items() if key != "state"},
+                 "state": public.get("state") or {}, "submissions": public.get("submissions") or [],
+                 "profile_sync_status": profile.get("profile_sync_status") or "pending"},
+                headers=[("Set-Cookie", f"{CREATOR_AUTH_COOKIE}={urllib.parse.quote(make_account_token(str(account['account_id'])))}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax")],
             )
             return
         if parsed.path == "/api/auth/login":

@@ -1,7 +1,11 @@
 .auth-overlay { overflow-y: auto; }
 .auth-card { min-height: 0; max-height: calc(100dvh - 44px); overflow-y: auto; }
 .auth-card input[hidden], .auth-card textarea[hidden] { display: none !important; }
-.auth-card #auth-register-password { margin-bottom: 12px; }
+.auth-guide[hidden], .auth-switch[hidden] { display: none !important; }
+.auth-card #auth-phone { margin-bottom: 8px; }
+.auth-card .auth-login-hint { color: #484c55; line-height: 1.55; }
+.auth-card .auth-login-hint strong { color: #eb5c00; }
+.auth-link-note { margin: 0 0 22px; color: #747982; font-size: 13px; line-height: 1.45; }
 @media (max-width: 420px) {
   .auth-overlay { padding: 12px; }
   .auth-card { width: 100%; padding: 28px 20px; max-height: calc(100dvh - 24px); }

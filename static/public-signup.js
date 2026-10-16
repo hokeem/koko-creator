@@ -2,96 +2,85 @@
   const form = document.querySelector("#auth-form");
   if (!form) return;
 
-  const registerPassword = document.createElement("input");
-  registerPassword.id = "auth-register-password";
-  registerPassword.name = "register_password";
-  registerPassword.type = "password";
-  registerPassword.autocomplete = "new-password";
-  registerPassword.minLength = 8;
-  registerPassword.maxLength = 128;
-  registerPassword.hidden = true;
-  document.querySelector("#auth-kwai").before(registerPassword);
-
   const originalSetAuthMode = setAuthMode;
-  setAuthMode = function (mode) {
-    originalSetAuthMode(mode);
-    const registering = authMode === "register";
-    const phone = document.querySelector("#auth-phone");
-    const kwai = document.querySelector("#auth-kwai");
-    const reason = document.querySelector("#auth-reason");
-    const name = document.querySelector("#auth-display-name");
-    phone.placeholder = registering ? "Número de celular com DDD" : "Telefone ou ID do Kwai";
-    phone.inputMode = registering ? "tel" : "text";
-    kwai.placeholder = registering ? "https://www.kwai.com/@seu_id" : "@seu_id_no_kwai";
-    kwai.type = registering ? "url" : "text";
-    kwai.required = registering;
-    registerPassword.hidden = !registering;
-    registerPassword.required = registering;
-    registerPassword.placeholder = "Crie uma senha (mínimo 8 caracteres)";
-    reason.hidden = true;
-    reason.disabled = registering;
-    if (registering) name.hidden = true;
-    document.querySelector("#auth-title").textContent = registering ? "Crie sua conta" : document.querySelector("#auth-title").textContent;
-    document.querySelector("#auth-submit").textContent = registering ? "Criar conta e começar" : document.querySelector("#auth-submit").textContent;
-    document.querySelector("#auth-guide-copy").textContent = registering
-      ? "Cadastre seu telefone, crie uma senha e cole o link do seu perfil Kwai. Seu acesso fica pronto na hora."
-      : document.querySelector("#auth-guide-copy").textContent;
-    document.querySelector("#auth-switch-copy").textContent = registering ? "Já tem conta?" : "Novo por aqui?";
-    document.querySelector("#auth-toggle").textContent = registering ? "Entrar" : "Criar conta";
-    const loginPassword = document.querySelector("#auth-password");
-    if (loginPassword && !registering) {
-      loginPassword.inputMode = "text";
-      loginPassword.placeholder = "Sua senha";
+  setAuthMode = function () {
+    originalSetAuthMode("login");
+    authMode = "kwai_link";
+    const portuguese = lang !== "zh";
+    const input = document.querySelector("#auth-phone");
+    input.name = "kwai_url";
+    input.type = "url";
+    input.inputMode = "url";
+    input.autocomplete = "url";
+    input.placeholder = "https://www.kwai.com/@seu_perfil";
+    input.required = true;
+    const password = document.querySelector("#auth-password");
+    if (password) {
+      password.hidden = true;
+      password.required = false;
+      password.disabled = true;
     }
+    document.querySelector("#auth-guide").classList.remove("active");
+    document.querySelector("#auth-guide").hidden = true;
+    document.querySelector(".auth-switch").hidden = true;
+    document.querySelector("#auth-back").classList.remove("active");
+    document.querySelector("#auth-title").textContent = portuguese ? "Entre com seu perfil do Kwai" : "使用 Kwai 主页进入";
+    document.querySelector("#auth-submit").textContent = portuguese ? "Continuar com meu perfil" : "使用主页链接进入";
     const hint = document.querySelector("#auth-login-hint");
-    if (hint && !registering && authMode === "login") {
-      hint.textContent = "Use sua senha. Contas antigas continuam com os 4 últimos dígitos do telefone.";
+    hint.hidden = false;
+    hint.innerHTML = portuguese
+      ? "Cole o link público do <strong>seu perfil</strong> no Kwai. A Koko usa esse endereço para reunir seus roteiros e vídeos enviados. Não pedimos sua senha do Kwai."
+      : "粘贴你的 Kwai 作者主页公开链接。Koko 会用它归集脚本与回传视频，不会要求你的 Kwai 密码。";
+    let note = document.querySelector("#auth-link-note");
+    if (!note) {
+      note = document.createElement("p");
+      note.id = "auth-link-note";
+      note.className = "auth-link-note";
+      input.after(note);
     }
+    note.textContent = portuguese
+      ? "Use o endereço do perfil (@usuário), não o link de um vídeo. O link não confirma a titularidade do perfil."
+      : "请使用 @作者 的主页链接，不是视频链接。公开链接无法验证主页归属。";
+    document.querySelectorAll('.landing [data-auth-open="login"]').forEach(button => {
+      button.textContent = portuguese ? "Entrar com meu perfil Kwai" : "使用 Kwai 主页进入";
+    });
   };
 
-  document.querySelectorAll('[data-auth-open="register"]').forEach(button => {
-    button.textContent = "Criar conta grátis";
-  });
-
   form.addEventListener("submit", async event => {
-    if (authMode !== "register") return;
+    if (authMode !== "kwai_link") return;
     event.preventDefault();
     event.stopImmediatePropagation();
     const button = document.querySelector("#auth-submit");
     if (button.disabled) return;
-    const phone = document.querySelector("#auth-phone").value.trim();
-    const password = registerPassword.value;
-    const kwai_url = document.querySelector("#auth-kwai").value.trim();
-    if (!/^\d{10,15}$/.test(phone.replace(/\D/g, ""))) {
-      setAuthStatus("Informe um telefone válido com DDD.", "error");
-      return;
-    }
-    if (password.length < 8 || password.length > 128) {
-      setAuthStatus("Crie uma senha de 8 a 128 caracteres.", "error");
-      return;
-    }
-    setButtonBusy(button, true, "Criando sua conta...");
-    setAuthStatus("Criando sua conta...", "loading");
+    const kwai_url = document.querySelector("#auth-phone").value.trim();
+    const portuguese = lang !== "zh";
+    setButtonBusy(button, true, portuguese ? "Identificando seu perfil..." : "正在识别主页...");
+    setAuthStatus(portuguese ? "Preparando seu espaço na Koko..." : "正在准备你的 Koko 页面...", "loading");
     try {
-      const response = await fetch("/api/auth/register", {
+      const response = await fetch("/api/auth/kwai-link", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone, password, kwai_url }),
+        body: JSON.stringify({ kwai_url }),
       });
       const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error || "Não foi possível criar a conta.");
+      if (!response.ok) throw new Error(result.error || (portuguese ? "Não foi possível abrir seu perfil. Confira o link." : "无法打开该主页，请检查链接。"));
       creatorUser = result.account;
       localStorage.setItem(authKey, JSON.stringify(creatorUser));
       await loadAccountState();
+      resetRepeatableTestFlow();
       updateCreatorName();
       closeAuth(true);
-      uiMessage("Conta criada! Escolha suas preferências para começar.", "success", 4000);
-      track("page_view", { source: "after_signup" });
-      show("choose");
+      track("page_view", { source: "after_kwai_link" });
+      show(!hasProfile() ? "choose" : "dashboard");
     } catch (error) {
-      setAuthStatus(error.message || "Não foi possível criar a conta.", "error");
+      setAuthStatus(error.message || (portuguese ? "Tente novamente." : "请重试。"), "error");
     } finally {
       setButtonBusy(button, false);
     }
   }, true);
+
+  setAuthMode("login");
+  document.querySelector(".landing .cta [data-auth-open='register']")?.remove();
+  const ending = document.querySelector(".landing .ending-card small");
+  if (ending) ending.textContent = "Cole o link do seu perfil Kwai, escolha suas preferências e encontre roteiros para gravar.";
 })();
