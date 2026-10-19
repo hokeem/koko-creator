@@ -6,3 +6,5 @@ data/creator_video_source_cache.json
 data/creator_script_html_cache/
 data/creator_sync_meta.json
 data/*.tmp
+data/*.jsonl
+data/.creator-*.lock

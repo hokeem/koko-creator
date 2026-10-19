@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import gzip
 import hashlib
 import html
@@ -11,7 +12,6 @@ import hmac
 import json
 import mimetypes
 import os
-import queue
 import re
 import secrets
 import shutil
@@ -20,6 +20,8 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from http import HTTPStatus
@@ -28,6 +30,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 try:
     from PIL import Image
@@ -107,12 +110,17 @@ CACHE_MAX_BYTES = int(os.environ.get("CREATOR_CACHE_MAX_MB", "256")) * 1024 * 10
 ANALYTICS_RETENTION_DAYS = int(os.environ.get("CREATOR_ANALYTICS_RETENTION_DAYS", "180"))
 ANALYTICS_MAX_EVENTS = int(os.environ.get("CREATOR_ANALYTICS_MAX_EVENTS", "200000"))
 ANALYTICS_WRITE_LOCK = threading.RLock()
-ANALYTICS_EVENT_QUEUE: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=4096)
+ANALYTICS_LOCK_DEPTH = threading.local()
 ACCOUNTS_CACHE_LOCK = threading.RLock()
 ACCOUNTS_CACHE: dict[str, Any] = {"signature": None, "accounts": []}
 SIGNUP_LOCK = threading.RLock()
+CREATOR_DATA_LOCK = threading.RLock()
+CREATOR_DATA_DEPTH = threading.local()
 AUTH_RATE_LOCK = threading.Lock()
 AUTH_ATTEMPTS: dict[str, list[float]] = {}
+PROFILE_ENRICH_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="kwai-profile")
+PROFILE_ENRICH_LOCK = threading.Lock()
+PROFILE_ENRICH_PENDING: set[str] = set()
 
 
 QUESTIONS = [
@@ -157,18 +165,91 @@ def now_iso() -> str:
 def read_json_file(path: Path, default: Any) -> Any:
     try:
         return json.loads(path.read_text("utf-8"))
+    except FileNotFoundError:
+        return default
     except Exception:
+        if path in {ACCOUNTS_FILE, CREATORS_FILE, SUBMISSIONS_FILE, ANALYTICS_FILE}:
+            raise
         return default
 
 
-def write_json_atomic(path: Path, payload: Any) -> None:
+def read_record_list(path: Path) -> list[dict[str, Any]]:
+    records = read_json_file(path, [])
+    if not isinstance(records, list) or any(not isinstance(item, dict) for item in records):
+        raise ValueError(f"Invalid creator data format: {path.name}")
+    return records
+
+
+def write_json_atomic(path: Path, payload: Any, *, durable: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
     try:
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), "utf-8")
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            if durable:
+                handle.flush()
+                os.fsync(handle.fileno())
         tmp.replace(path)
+        if durable:
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+@contextmanager
+def creator_data_transaction(*, invalidate_cache: bool = True):
+    """Serialize creator data read-modify-write cycles across threads and workers."""
+    with CREATOR_DATA_LOCK:
+        depth = getattr(CREATOR_DATA_DEPTH, "value", 0)
+        lock_file = None
+        if depth == 0:
+            lock_path = ACCOUNTS_FILE.parent / ".creator-data.lock"
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_file = lock_path.open("a+b")
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+            except Exception:
+                lock_file.close()
+                raise
+            if invalidate_cache:
+                ACCOUNTS_CACHE["signature"] = None
+        CREATOR_DATA_DEPTH.value = depth + 1
+        try:
+            yield
+        finally:
+            CREATOR_DATA_DEPTH.value -= 1
+            if lock_file is not None:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+                lock_file.close()
+
+
+@contextmanager
+def analytics_data_transaction():
+    """Keep log migration, appends, and pruning atomic across workers."""
+    with ANALYTICS_WRITE_LOCK:
+        depth = getattr(ANALYTICS_LOCK_DEPTH, "value", 0)
+        lock_file = None
+        if depth == 0:
+            lock_path = ANALYTICS_FILE.parent / ".creator-analytics.lock"
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_file = lock_path.open("a+b")
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+            except Exception:
+                lock_file.close()
+                raise
+        ANALYTICS_LOCK_DEPTH.value = depth + 1
+        try:
+            yield
+        finally:
+            ANALYTICS_LOCK_DEPTH.value -= 1
+            if lock_file is not None:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+                lock_file.close()
 
 
 def client_ip(headers: Any) -> str:
@@ -692,7 +773,7 @@ def prune_analytics_events(
     retention_days: int = ANALYTICS_RETENTION_DAYS,
     max_events: int = ANALYTICS_MAX_EVENTS,
 ) -> dict[str, int]:
-    with ANALYTICS_WRITE_LOCK:
+    with analytics_data_transaction():
         events = load_analytics_events()
         original = len(events)
         cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, retention_days))
@@ -707,10 +788,7 @@ def prune_analytics_events(
             kept.sort(key=lambda item: str(item.get("created_at") or ""))
             kept = kept[-max_events:]
         if len(kept) != original:
-            try:
-                save_analytics_events(kept)
-            except OSError:
-                ANALYTICS_FILE.write_text(json.dumps(kept, ensure_ascii=False), "utf-8")
+            save_analytics_events(kept)
         return {"before": original, "after": len(kept), "removed": max(0, original - len(kept))}
 
 
@@ -1892,16 +1970,6 @@ def save_submission(payload: dict[str, Any], *, account: dict[str, Any] | None =
     meta = link_metadata(video_url)
     fallback_thumb = f"/api/creator/thumbnail/{entry_id}.webp"
     creator_id = canonical_account_key(str((account or {}).get("account_id") or payload.get("creator_id") or "local_creator"))
-    submissions = read_json_file(SUBMISSIONS_FILE, [])
-    if not isinstance(submissions, list):
-        submissions = []
-    for existing in submissions:
-        if not isinstance(existing, dict):
-            continue
-        same_creator = canonical_account_key(str(existing.get("creator_id") or "local_creator")) == (creator_id or "local_creator")
-        same_video = normalize_submission_video_url(existing.get("video_url") or "") == normalized_video_url
-        if same_creator and same_video:
-            raise DuplicateSubmissionError("作品已上传，无需重复上传")
     detected_kwai_id = resolve_kwai_id_from_video_link(video_url, timeout=10)
     submission = {
         "submission_id": uuid4().hex,
@@ -1928,13 +1996,27 @@ def save_submission(payload: dict[str, Any], *, account: dict[str, Any] | None =
             "creator_profile_name": matched_creator.get("name", ""),
             "creator_profile_kwai_id": matched_creator.get("kwai_id", ""),
         })
-    submissions.insert(0, submission)
-    write_json_atomic(SUBMISSIONS_FILE, submissions[:1000])
+    with creator_data_transaction():
+        submissions = read_record_list(SUBMISSIONS_FILE)
+        for existing in submissions:
+            if not isinstance(existing, dict):
+                continue
+            same_creator = canonical_account_key(str(existing.get("creator_id") or "local_creator")) == (creator_id or "local_creator")
+            same_video = normalize_submission_video_url(existing.get("video_url") or "") == normalized_video_url
+            if same_creator and same_video:
+                raise DuplicateSubmissionError("作品已上传，无需重复上传")
+        submissions.insert(0, submission)
+        write_json_atomic(SUBMISSIONS_FILE, submissions, durable=True)
     return submission
 
 
 def import_admin_submission(payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Idempotently import a trusted creator return into dashboard analytics."""
+    with creator_data_transaction():
+        return _import_admin_submission_unlocked(payload)
+
+
+def _import_admin_submission_unlocked(payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     entry_id = str(payload.get("entry_id") or "").strip()
     video_url = str(payload.get("video_url") or "").strip()
     profile_id = str(payload.get("creator_profile_id") or "").strip()
@@ -1967,9 +2049,7 @@ def import_admin_submission(payload: dict[str, Any]) -> tuple[dict[str, Any], bo
     )
     normalized_video_url = normalize_submission_video_url(video_url)
     submitted_at = str(payload.get("created_at") or payload.get("return_time") or now_iso()).strip() or now_iso()
-    submissions = read_json_file(SUBMISSIONS_FILE, [])
-    if not isinstance(submissions, list):
-        submissions = []
+    submissions = read_record_list(SUBMISSIONS_FILE)
     existing = next(
         (
             item
@@ -2005,7 +2085,7 @@ def import_admin_submission(payload: dict[str, Any]) -> tuple[dict[str, Any], bo
         existing = {"submission_id": uuid4().hex}
         submissions.insert(0, existing)
     existing.update(values)
-    write_json_atomic(SUBMISSIONS_FILE, submissions[:1000])
+    write_json_atomic(SUBMISSIONS_FILE, submissions, durable=True)
     return existing, created
 
 
@@ -2117,12 +2197,15 @@ def backfill_admin_script_opens(payload: dict[str, Any], headers: Any) -> dict[s
 
 
 def delete_submissions_by_ids(submission_ids: list[str]) -> dict[str, Any]:
+    with creator_data_transaction():
+        return _delete_submissions_by_ids_unlocked(submission_ids)
+
+
+def _delete_submissions_by_ids_unlocked(submission_ids: list[str]) -> dict[str, Any]:
     ids = {str(item or "").strip() for item in submission_ids if str(item or "").strip()}
     if not ids:
         return {"ok": True, "deleted": 0, "missing_ids": [], "total_before": 0, "total_after": 0}
-    submissions = read_json_file(SUBMISSIONS_FILE, [])
-    if not isinstance(submissions, list):
-        submissions = []
+    submissions = read_record_list(SUBMISSIONS_FILE)
     total_before = len(submissions)
     kept: list[dict[str, Any]] = []
     deleted_ids: list[str] = []
@@ -2132,7 +2215,7 @@ def delete_submissions_by_ids(submission_ids: list[str]) -> dict[str, Any]:
             continue
         kept.append(item)
     if len(kept) != total_before:
-        write_json_atomic(SUBMISSIONS_FILE, kept[:1000])
+        write_json_atomic(SUBMISSIONS_FILE, kept, durable=True)
     missing_ids = sorted(ids - set(deleted_ids))
     return {
         "ok": True,
@@ -2175,11 +2258,10 @@ def save_access_application(payload: dict[str, Any], headers: Any) -> dict[str, 
 
 
 def backfill_submission_creators(limit: int = 200) -> dict[str, Any]:
-    submissions = read_json_file(SUBMISSIONS_FILE, [])
-    if not isinstance(submissions, list):
-        submissions = []
+    submissions = read_record_list(SUBMISSIONS_FILE)
     checked = 0
     updated = 0
+    resolved: dict[str, str] = {}
     results: list[dict[str, Any]] = []
     for idx, item in enumerate(submissions):
         if checked >= limit:
@@ -2200,14 +2282,25 @@ def backfill_submission_creators(limit: int = 200) -> dict[str, Any]:
             "updated": False,
         }
         if detected:
-            item["detected_kwai_id"] = detected
-            item["matched_at"] = now_iso()
-            submissions[idx] = item
-            updated += 1
-            result["updated"] = True
+            submission_id = str(item.get("submission_id") or "")
+            if submission_id:
+                resolved[submission_id] = detected
         results.append(result)
-    if updated:
-        write_json_atomic(SUBMISSIONS_FILE, submissions[:1000])
+    if resolved:
+        with creator_data_transaction():
+            latest = read_record_list(SUBMISSIONS_FILE)
+            for item in latest:
+                if not isinstance(item, dict):
+                    continue
+                detected = resolved.get(str(item.get("submission_id") or ""))
+                if detected and not normalize_kwai_id(item.get("detected_kwai_id") or ""):
+                    item["detected_kwai_id"] = detected
+                    item["matched_at"] = now_iso()
+                    updated += 1
+            if updated:
+                write_json_atomic(SUBMISSIONS_FILE, latest, durable=True)
+    for result in results:
+        result["updated"] = bool(result.get("submission_id") in resolved)
     return {"ok": True, "checked": checked, "updated": updated, "total": len(submissions), "results": results}
 
 
@@ -2576,12 +2669,18 @@ def accounts_file_signature() -> tuple[int, int]:
 
 def load_accounts() -> list[dict[str, Any]]:
     with ACCOUNTS_CACHE_LOCK:
+        if ACCOUNTS_CACHE.get("signature") == accounts_file_signature():
+            return list(ACCOUNTS_CACHE.get("accounts") or [])
+    with creator_data_transaction(invalidate_cache=False):
+        return _load_accounts_unlocked()
+
+
+def _load_accounts_unlocked() -> list[dict[str, Any]]:
+    with ACCOUNTS_CACHE_LOCK:
         signature = accounts_file_signature()
         if ACCOUNTS_CACHE.get("signature") == signature:
             return list(ACCOUNTS_CACHE.get("accounts") or [])
-        accounts = read_json_file(ACCOUNTS_FILE, [])
-        if not isinstance(accounts, list):
-            accounts = []
+        accounts = read_record_list(ACCOUNTS_FILE)
         accounts, changed = migrate_account_replacements(accounts)
         seen = {str(item.get("account_id") or "") for item in accounts if isinstance(item, dict)}
         now = now_iso()
@@ -2614,9 +2713,9 @@ def load_accounts() -> list[dict[str, Any]]:
                 })
                 seen.add(account_id)
                 changed = True
-        clean = [item for item in accounts[:5000] if isinstance(item, dict)]
+        clean = [item for item in accounts if isinstance(item, dict)]
         if changed:
-            write_json_atomic(ACCOUNTS_FILE, clean)
+            write_json_atomic(ACCOUNTS_FILE, clean, durable=True)
             signature = accounts_file_signature()
         ACCOUNTS_CACHE["signature"] = signature
         ACCOUNTS_CACHE["accounts"] = clean
@@ -2624,9 +2723,9 @@ def load_accounts() -> list[dict[str, Any]]:
 
 
 def save_accounts(accounts: list[dict[str, Any]]) -> None:
-    clean = [item for item in accounts[:5000] if isinstance(item, dict)]
+    clean = [item for item in accounts if isinstance(item, dict)]
     with ACCOUNTS_CACHE_LOCK:
-        write_json_atomic(ACCOUNTS_FILE, clean)
+        write_json_atomic(ACCOUNTS_FILE, clean, durable=True)
         ACCOUNTS_CACHE["signature"] = accounts_file_signature()
         ACCOUNTS_CACHE["accounts"] = clean
 
@@ -2780,6 +2879,19 @@ def upsert_account(
     kwai_id: str = "",
     uid: str = "",
 ) -> dict[str, Any]:
+    with creator_data_transaction():
+        return _upsert_account_unlocked(account_id, source=source, display_name=display_name, phone=phone, kwai_id=kwai_id, uid=uid)
+
+
+def _upsert_account_unlocked(
+    account_id: str,
+    *,
+    source: str = "admin",
+    display_name: str = "",
+    phone: str = "",
+    kwai_id: str = "",
+    uid: str = "",
+) -> dict[str, Any]:
     registered_source = source in {"self_signup", "admin_created"}
     clean = canonical_account_key(account_id or phone or kwai_id or uid)
     if not clean:
@@ -2844,6 +2956,11 @@ def current_account(headers: Any) -> dict[str, Any] | None:
 
 
 def mark_account_registered(account_id: str, *, action: str = "login") -> dict[str, Any] | None:
+    with creator_data_transaction():
+        return _mark_account_registered_unlocked(account_id, action=action)
+
+
+def _mark_account_registered_unlocked(account_id: str, *, action: str = "login") -> dict[str, Any] | None:
     target = canonical_account_key(account_id)
     accounts = load_accounts()
     now = now_iso()
@@ -2877,7 +2994,14 @@ def write_analytics_log_atomic(events: list[dict[str, Any]]) -> None:
                 if isinstance(event, dict):
                     handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")))
                     handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         temp_path.replace(path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise
@@ -2893,18 +3017,33 @@ def append_analytics_log(path: Path, events: list[dict[str, Any]]) -> None:
     ).encode("utf-8")
     with path.open("ab+") as handle:
         handle.seek(0, os.SEEK_END)
-        if handle.tell() > 0:
+        end = handle.tell()
+        if end:
             handle.seek(-1, os.SEEK_END)
             if handle.read(1) != b"\n":
-                handle.seek(0, os.SEEK_END)
-                handle.write(b"\n")
+                scan_start = max(0, end - 65536)
+                handle.seek(scan_start)
+                tail = handle.read(end - scan_start)
+                last_break = tail.rfind(b"\n")
+                line_start = scan_start + last_break + 1 if last_break >= 0 else scan_start
+                if last_break < 0 and scan_start:
+                    raise ValueError("Analytics log has an oversized incomplete line")
+                try:
+                    json.loads(tail[last_break + 1:])
+                except (ValueError, UnicodeDecodeError):
+                    handle.truncate(line_start)
+                else:
+                    handle.seek(0, os.SEEK_END)
+                    handle.write(b"\n")
         handle.seek(0, os.SEEK_END)
         handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def ensure_analytics_log() -> Path:
     path = analytics_log_path()
-    with ANALYTICS_WRITE_LOCK:
+    with analytics_data_transaction():
         if path.exists():
             if ANALYTICS_FILE.exists():
                 try:
@@ -2912,8 +3051,8 @@ def ensure_analytics_log() -> Path:
                 except OSError:
                     pass
             return path
-        legacy = read_json_file(ANALYTICS_FILE, [])
-        events = [item for item in legacy if isinstance(item, dict)] if isinstance(legacy, list) else []
+        legacy = read_record_list(ANALYTICS_FILE)
+        events = legacy
         write_analytics_log_atomic(events)
         if ANALYTICS_FILE.exists():
             try:
@@ -2924,27 +3063,28 @@ def ensure_analytics_log() -> Path:
 
 
 def load_analytics_events() -> list[dict[str, Any]]:
-    with ANALYTICS_WRITE_LOCK:
+    with analytics_data_transaction():
         path = ensure_analytics_log()
-        events: list[dict[str, Any]] = []
         try:
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    if not line.strip():
-                        continue
-                    try:
-                        item = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(item, dict):
-                        events.append(item)
+            snapshot = path.read_bytes()
         except FileNotFoundError:
             return []
-        return events
+    events: list[dict[str, Any]] = []
+    for line_number, line in enumerate(snapshot.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError(f"Invalid analytics event at line {line_number}") from exc
+        if not isinstance(item, dict):
+            raise ValueError(f"Invalid analytics event at line {line_number}")
+        events.append(item)
+    return events
 
 
 def save_analytics_events(events: list[dict[str, Any]]) -> None:
-    with ANALYTICS_WRITE_LOCK:
+    with analytics_data_transaction():
         write_analytics_log_atomic(events)
         if ANALYTICS_FILE.exists():
             try:
@@ -3005,7 +3145,7 @@ def build_analytics_event(
 def persist_analytics_events(new_events: list[dict[str, Any]]) -> None:
     if not new_events:
         return
-    with ANALYTICS_WRITE_LOCK:
+    with analytics_data_transaction():
         path = ensure_analytics_log()
         append_analytics_log(path, new_events)
 
@@ -3023,30 +3163,7 @@ def append_analytics_event(
 
 
 def enqueue_analytics_events(events: list[dict[str, Any]]) -> None:
-    for event in events:
-        try:
-            ANALYTICS_EVENT_QUEUE.put_nowait(event)
-        except queue.Full:
-            print("analytics_queue_full event_dropped=1", flush=True)
-
-
-def analytics_writer_loop() -> None:
-    while True:
-        first = ANALYTICS_EVENT_QUEUE.get()
-        batch = [first]
-        time.sleep(0.05)
-        while len(batch) < 100:
-            try:
-                batch.append(ANALYTICS_EVENT_QUEUE.get_nowait())
-            except queue.Empty:
-                break
-        try:
-            persist_analytics_events(batch)
-        except Exception as exc:
-            print(f"analytics_batch_write_failed count={len(batch)} error={exc}", flush=True)
-        finally:
-            for _ in batch:
-                ANALYTICS_EVENT_QUEUE.task_done()
+    persist_analytics_events(events)
 
 
 def script_id_from_url(value: object) -> str:
@@ -3110,7 +3227,8 @@ def parse_iso_time(value: object) -> datetime | None:
         text = str(value or "")
         if not text:
             return None
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        created = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return created if created.tzinfo else created.replace(tzinfo=timezone.utc)
     except Exception:
         return None
 
@@ -3174,37 +3292,24 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
     submissions_raw = read_json_file(SUBMISSIONS_FILE, [])
     submissions = [item for item in (submissions_raw if isinstance(submissions_raw, list) else []) if isinstance(item, dict)]
 
-    visitor_accounts: dict[str, dict[str, Any]] = {}
-    for event in events:
-        visitor_id = str(event.get("visitor_id") or "").strip()
-        account = find_account_from_lookup(str(event.get("account_id") or ""), alias_lookup)
-        if visitor_id and account:
-            visitor_accounts[visitor_id] = account
-
     script_opens = 0
     raw_script_opens = 0
     active_account_ids: set[int] = set()
     unique_script_ids: set[str] = set()
     daily_people: dict[str, dict[int, dict[str, str]]] = {}
+    weekly_people: dict[str, set[int]] = {}
     daily_script_opens: dict[str, int] = {}
     daily_scripts: dict[str, set[str]] = {}
+    brazil_tz = ZoneInfo("America/Sao_Paulo")
     for event in events:
-        if str(event.get("event") or "") not in {"script_open", "detail_open"}:
-            continue
-        script_id = str(event.get("script_id") or "").strip()
-        if not script_id:
-            continue
-        raw_script_opens += 1
+        event_name = str(event.get("event") or "")
         account = find_account_from_lookup(str(event.get("account_id") or ""), alias_lookup)
-        if not account:
-            account = visitor_accounts.get(str(event.get("visitor_id") or "").strip())
-        if account and id(account) not in test_accounts:
-            script_opens += 1
-            active_account_ids.add(id(account))
-            unique_script_ids.add(script_id)
+        if account and id(account) not in test_accounts and event_name and event_name != "page_duration":
             created = parse_iso_time(event.get("created_at"))
-            day = created.date().isoformat() if created else str(event.get("created_at") or "")[:10]
-            if day:
+            if created:
+                local_day = created.astimezone(brazil_tz).date()
+                day = local_day.isoformat()
+                week = (local_day - timedelta(days=local_day.weekday())).isoformat()
                 account_id = str(account.get("account_id") or account.get("phone") or "").strip()
                 daily_people.setdefault(day, {})[id(account)] = {
                     "account_id": account_id,
@@ -3212,6 +3317,20 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
                     "phone": str(account.get("phone") or ""),
                     "kwai_id": str(account.get("kwai_id") or ""),
                 }
+                weekly_people.setdefault(week, set()).add(id(account))
+                active_account_ids.add(id(account))
+        if event_name not in {"script_open", "detail_open"}:
+            continue
+        script_id = str(event.get("script_id") or "").strip()
+        if not script_id:
+            continue
+        raw_script_opens += 1
+        if account and id(account) not in test_accounts:
+            script_opens += 1
+            unique_script_ids.add(script_id)
+            created = parse_iso_time(event.get("created_at"))
+            day = created.astimezone(brazil_tz).date().isoformat() if created else ""
+            if day:
                 daily_script_opens[day] = daily_script_opens.get(day, 0) + 1
                 daily_scripts.setdefault(day, set()).add(script_id)
 
@@ -3258,6 +3377,8 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
             or id(account) in matched_submission_accounts
         )
     )
+    today = datetime.now(timezone.utc).astimezone(brazil_tz).date()
+    current_week = (today - timedelta(days=today.weekday())).isoformat()
     return {
         "ok": True,
         "days": days,
@@ -3267,6 +3388,9 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
             "script_opens": script_opens,
             "raw_script_opens": raw_script_opens,
             "active_users": len(active_account_ids),
+            "daily_active_users": len(daily_people.get(today.isoformat(), {})),
+            "weekly_active_users": len(weekly_people.get(current_week, set())),
+            "current_week_start": current_week,
             "unique_scripts_opened": len(unique_script_ids),
             "submissions": submission_count,
         },
@@ -3279,6 +3403,10 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
                 "people": list(daily_people.get(day, {}).values()),
             }
             for day in sorted(daily_people, reverse=True)
+        ],
+        "weekly_usage": [
+            {"week_start": week, "active_users": len(people)}
+            for week, people in sorted(weekly_people.items(), reverse=True)
         ],
     }
 
@@ -3407,16 +3535,28 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
             })
 
     events_by_account: dict[str, list[dict[str, Any]]] = {}
-    events_by_visitor: dict[str, list[dict[str, Any]]] = {}
-    visitor_ids_by_account: dict[str, set[str]] = {}
     for event in events:
-        event_account_id = canonical_account_key(str(event.get("account_id") or ""))
-        visitor_id = str(event.get("visitor_id") or "")
-        events_by_account.setdefault(event_account_id, []).append(event)
-        if visitor_id:
-            events_by_visitor.setdefault(visitor_id, []).append(event)
-        if event_account_id and visitor_id:
-            visitor_ids_by_account.setdefault(event_account_id, set()).add(visitor_id)
+        account = find_account_from_lookup(str(event.get("account_id") or ""), account_by_id)
+        if account:
+            events_by_account.setdefault(str(account.get("account_id") or ""), []).append(event)
+    brazil_tz = ZoneInfo("America/Sao_Paulo")
+    today = datetime.now(timezone.utc).astimezone(brazil_tz).date()
+    current_week = (today - timedelta(days=today.weekday())).isoformat()
+    daily_active_accounts: dict[str, set[str]] = {}
+    weekly_active_accounts: dict[str, set[str]] = {}
+    for account_id, user_events in events_by_account.items():
+        account = account_by_id.get(account_id)
+        if not account or "666" in account_aliases(account):
+            continue
+        for event in user_events:
+            if not event.get("event") or event.get("event") == "page_duration":
+                continue
+            created = parse_iso_time(event.get("created_at"))
+            if not created:
+                continue
+            local_day = created.astimezone(brazil_tz).date()
+            daily_active_accounts.setdefault(local_day.isoformat(), set()).add(account_id)
+            weekly_active_accounts.setdefault((local_day - timedelta(days=local_day.weekday())).isoformat(), set()).add(account_id)
 
     users: list[dict[str, Any]] = []
     inactive_users: list[dict[str, Any]] = []
@@ -3431,14 +3571,6 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
             if event_id:
                 seen_event_ids.add(event_id)
             user_events.append(event)
-        for visitor_id in visitor_ids_by_account.get(account_id, set()):
-            for event in events_by_visitor.get(visitor_id, []):
-                event_id = str(event.get("event_id") or "")
-                if event_id and event_id in seen_event_ids:
-                    continue
-                if event_id:
-                    seen_event_ids.add(event_id)
-                user_events.append(event)
         user_submissions = [item for item in submissions if submission_matches_account(item, account)]
         registered_bucket = analytics_hour_bucket(account.get("registered_at") or account.get("last_registered_at"))
         if not registered_bucket and user_submissions:
@@ -3519,6 +3651,7 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
             "scheduled_count": sum(len(v) for v in (workspace.get("schedule") or {}).values() if isinstance(v, list)) if isinstance(workspace.get("schedule"), dict) else 0,
             "platform_open_count": platform_open_count,
             "script_share_open_count": script_open_count,
+            "unique_scripts_opened": len(script_stats),
             "platform_duration_seconds": round(platform_duration_ms / 1000),
             "script_duration_seconds": round(script_duration_ms / 1000),
             "click_counts": clicks,
@@ -3558,13 +3691,25 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
             "submissions": len(submissions),
             "platform_opens": sum(int(item.get("platform_open_count") or 0) for item in users),
             "script_opens": sum(int(item.get("script_share_open_count") or 0) for item in users),
+            "daily_active_users": len(daily_active_accounts.get(today.isoformat(), set())),
+            "weekly_active_users": len(weekly_active_accounts.get(current_week, set())),
+            "current_week_start": current_week,
         },
+        "weekly_usage": [
+            {"week_start": week, "active_users": len(account_ids)}
+            for week, account_ids in sorted(weekly_active_accounts.items(), reverse=True)
+        ],
         "users": users,
         "inactive_users": inactive_users if include_inactive else [],
         "inactive_loaded": bool(include_inactive),
     }
 
 def update_account_state(account_id: str, state_patch: dict[str, Any]) -> dict[str, Any]:
+    with creator_data_transaction():
+        return _update_account_state_unlocked(account_id, state_patch)
+
+
+def _update_account_state_unlocked(account_id: str, state_patch: dict[str, Any]) -> dict[str, Any]:
     clean = canonical_account_key(account_id)
     accounts = load_accounts()
     for idx, account in enumerate(accounts):
@@ -3616,6 +3761,11 @@ def update_account_profile(account_id: str, payload: dict[str, Any]) -> dict[str
 
 
 def delete_account(account_id: str) -> bool:
+    with creator_data_transaction():
+        return _delete_account_unlocked(account_id)
+
+
+def _delete_account_unlocked(account_id: str) -> bool:
     aliases = account_aliases({"account_id": account_id, "phone": account_id})
     aliases.add(canonical_account_key(account_id))
     aliases.add(canonical_account_key(normalize_phone(account_id)))
@@ -3699,7 +3849,7 @@ def signup_kwai_profile_url(value: str) -> tuple[str, str]:
 def enter_by_kwai_profile(value: str) -> tuple[dict[str, Any], dict[str, Any], bool]:
     kwai_url, kwai_id = signup_kwai_profile_url(value)
     normalized_handle = kwai_id.casefold()
-    with SIGNUP_LOCK, ACCOUNTS_CACHE_LOCK:
+    with creator_data_transaction(), SIGNUP_LOCK, ACCOUNTS_CACHE_LOCK:
         accounts = load_accounts()
         profiles = load_creator_profiles()
         original_profiles = list(profiles)
@@ -3788,7 +3938,7 @@ def register_public_creator(payload: dict[str, Any]) -> tuple[dict[str, Any], di
     if len(password) < 8 or len(password) > 128 or password != password.strip():
         raise ValueError("Crie uma senha de 8 a 128 caracteres.")
     kwai_url, kwai_id = signup_kwai_profile_url(str(payload.get("kwai_url") or ""))
-    with SIGNUP_LOCK, ACCOUNTS_CACHE_LOCK:
+    with creator_data_transaction(), SIGNUP_LOCK, ACCOUNTS_CACHE_LOCK:
         accounts = load_accounts()
         profiles = load_creator_profiles()
         if any(phone in account_aliases(item) for item in accounts):
@@ -3832,7 +3982,7 @@ def enrich_public_creator_profile(profile_id: str, kwai_url: str) -> None:
         status = "ready" if fetched.get("profile_found") else "unavailable"
     except Exception:
         fetched, status = {}, "unavailable"
-    with SIGNUP_LOCK:
+    with creator_data_transaction(), SIGNUP_LOCK:
         profiles = load_creator_profiles()
         for index, profile in enumerate(profiles):
             if str(profile.get("profile_id") or "") != profile_id or str(profile.get("kwai_url") or "") != kwai_url:
@@ -3858,6 +4008,27 @@ def enrich_public_creator_profile(profile_id: str, kwai_url: str) -> None:
                             save_accounts(accounts)
                             break
             break
+
+
+def schedule_profile_enrichment(profile_id: str, kwai_url: str) -> None:
+    with PROFILE_ENRICH_LOCK:
+        if profile_id in PROFILE_ENRICH_PENDING or len(PROFILE_ENRICH_PENDING) >= 200:
+            return
+        PROFILE_ENRICH_PENDING.add(profile_id)
+
+    def run() -> None:
+        try:
+            enrich_public_creator_profile(profile_id, kwai_url)
+        finally:
+            with PROFILE_ENRICH_LOCK:
+                PROFILE_ENRICH_PENDING.discard(profile_id)
+
+    try:
+        PROFILE_ENRICH_POOL.submit(run)
+    except Exception:
+        with PROFILE_ENRICH_LOCK:
+            PROFILE_ENRICH_PENDING.discard(profile_id)
+        raise
 
 
 def kwai_handle_from_url(url: str) -> str:
@@ -3916,8 +4087,12 @@ def fetch_kwai_profile(url: str, timeout: int = 24) -> dict[str, Any]:
 
 
 def load_creator_profiles() -> list[dict[str, Any]]:
-    data = read_json_file(CREATORS_FILE, [])
-    profiles = [item for item in data if isinstance(item, dict)]
+    with creator_data_transaction(invalidate_cache=False):
+        return _load_creator_profiles_unlocked()
+
+
+def _load_creator_profiles_unlocked() -> list[dict[str, Any]]:
+    profiles = read_record_list(CREATORS_FILE)
     changed = False
     for profile in profiles:
         account_id = str(profile.get("account_id") or "")
@@ -3936,7 +4111,7 @@ def load_creator_profiles() -> list[dict[str, Any]]:
 
 
 def save_creator_profiles(profiles: list[dict[str, Any]]) -> None:
-    write_json_atomic(CREATORS_FILE, profiles[:2000])
+    write_json_atomic(CREATORS_FILE, profiles, durable=True)
 
 
 def list_field(value: Any) -> list[str]:
@@ -4207,6 +4382,18 @@ def create_or_update_creator_profile(payload: dict[str, Any], profile_id: str | 
         kwai_id=provided_kwai_id,
         uid=provided_uid,
     )
+    with creator_data_transaction():
+        return _commit_creator_profile(
+            payload, profile_id, categories, kwai_url, fetched,
+            provided_kwai_id, provided_phone, provided_uid, display_name, account_public,
+        )
+
+
+def _commit_creator_profile(
+    payload: dict[str, Any], profile_id: str | None, categories: list[str], kwai_url: str,
+    fetched: dict[str, Any], provided_kwai_id: str, provided_phone: str,
+    provided_uid: str, display_name: str, account_public: dict[str, Any],
+) -> dict[str, Any]:
     profiles = load_creator_profiles()
     existing_index = -1
     for idx, item in enumerate(profiles):
@@ -4261,6 +4448,11 @@ def create_or_update_creator_profile(payload: dict[str, Any], profile_id: str | 
 
 
 def delete_creator_profile(profile_id: str) -> bool:
+    with creator_data_transaction():
+        return _delete_creator_profile_unlocked(profile_id)
+
+
+def _delete_creator_profile_unlocked(profile_id: str) -> bool:
     profiles = load_creator_profiles()
     next_profiles = [item for item in profiles if str(item.get("profile_id") or "") != profile_id]
     if len(next_profiles) == len(profiles):
@@ -5177,8 +5369,12 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 payload = {}
             visitor_id = analytics_visitor_id(self.headers)
-            event = build_analytics_event(payload, self.headers, visitor_id=visitor_id)
-            enqueue_analytics_events([event])
+            try:
+                event = build_analytics_event(payload, self.headers, visitor_id=visitor_id)
+                enqueue_analytics_events([event])
+            except Exception:
+                self.send_json({"error": "Não foi possível registrar a atividade. Tente novamente."}, status=503)
+                return
             self.send_json(
                 {"ok": True, "event_id": event.get("event_id")},
                 status=201,
@@ -5186,7 +5382,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if parsed.path == "/api/auth/kwai-link":
-            if not auth_rate_allowed("kwai_link", client_ip(self.headers), limit=40, window=3600):
+            if not auth_rate_allowed("kwai_link", client_ip(self.headers), limit=300, window=3600):
                 self.send_json({"error": "Muitas tentativas. Aguarde um pouco e tente novamente."}, status=429)
                 return
             if int(self.headers.get("Content-Length", "0") or "0") > 2048:
@@ -5215,11 +5411,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             record_login_referer_open(self.headers, account)
             if not profile.get("avatar_url") and profile.get("profile_sync_status") != "ready":
-                threading.Thread(
-                    target=enrich_public_creator_profile,
-                    args=(str(profile["profile_id"]), str(profile["kwai_url"])),
-                    daemon=True,
-                ).start()
+                schedule_profile_enrichment(str(profile["profile_id"]), str(profile["kwai_url"]))
             public = public_account(account, include_state=True)
             self.send_json(
                 {"ok": True, "account": {key: value for key, value in public.items() if key != "state"},
@@ -5573,7 +5765,6 @@ def main() -> int:
         print(f"data_root_init_failed path={DATA_ROOT!s} error={exc}", flush=True)
     server = ResilientThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(json.dumps({"port": PORT, "data_root": str(DATA_ROOT)}, ensure_ascii=False), flush=True)
-    threading.Thread(target=analytics_writer_loop, name="creator-analytics-writer", daemon=True).start()
 
     def startup_maintenance() -> None:
         try:
