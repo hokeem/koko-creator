@@ -108,6 +108,18 @@ class CreatorDataIntegrityTests(unittest.TestCase):
         self.assertEqual(dashboard["summary"]["new_creators"], 1)
         self.assertEqual(dashboard["rows"][0]["source"], "email")
 
+    def test_existing_creator_is_not_counted_as_new_and_bot_visit_is_excluded(self) -> None:
+        account, _, _ = app.enter_by_kwai_profile("https://kwai.com/@existing_creator")
+        touch = {"source": "whatsapp", "campaign": "friends", "at": app.now_iso()}
+        app.enter_by_kwai_profile("https://kwai.com/@existing_creator", {"first": touch, "last": touch})
+        app.persist_analytics_events([{
+            "event": "campaign_visit", "created_at": app.now_iso(), "visitor_id": "bot",
+            "user_agent": "curl/8.0", "meta": {"source": "whatsapp", "campaign": "friends"},
+        }])
+        dashboard = app.creator_campaign_dashboard_payload(30)
+        self.assertEqual(dashboard["rows"][0]["new_creators"], 0)
+        self.assertEqual(dashboard["rows"][0]["visits"], 0)
+
     def test_one_hundred_simultaneous_http_entries_keep_cards_and_activity(self) -> None:
         app.AUTH_ATTEMPTS.clear()
         server = app.ResilientThreadingHTTPServer(("127.0.0.1", 0), app.Handler)

@@ -3491,7 +3491,9 @@ def creator_campaign_dashboard_payload(days: int = 30) -> dict[str, Any]:
     for account in accounts:
         target = account_row(account)
         first_at = parse_iso_time((account.get("attribution") or {}).get("first", {}).get("at"))
-        if target and first_at and first_at >= datetime.now(timezone.utc) - timedelta(days=days):
+        account_created = parse_iso_time(account.get("created_at"))
+        if (target and first_at and account_created and account_created >= first_at
+                and first_at >= datetime.now(timezone.utc) - timedelta(days=days)):
             target["new_creators"] += 1
 
     for event in load_analytics_events():
@@ -3499,6 +3501,9 @@ def creator_campaign_dashboard_payload(days: int = 30) -> dict[str, Any]:
             continue
         name = str(event.get("event") or "")
         if name == "campaign_visit":
+            user_agent = str(event.get("user_agent") or "").lower()
+            if user_agent.startswith(("curl/", "python-urllib/")):
+                continue
             meta = event.get("meta") if isinstance(event.get("meta"), dict) else {}
             source, campaign = meta.get("source"), meta.get("campaign")
             if source in CAMPAIGN_SOURCES and campaign_slug(campaign):
