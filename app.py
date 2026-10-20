@@ -66,6 +66,8 @@ ADMIN_PASSWORD = os.environ.get("KOKO_CREATOR_ADMIN_PASSWORD", "kokokwai@2026")
 ADMIN_COOKIE = "koko_creator_admin"
 CREATOR_AUTH_COOKIE = "koko_creator_auth"
 VISITOR_COOKIE = "koko_creator_visitor"
+ATTRIBUTION_COOKIE = "koko_creator_campaign"
+CAMPAIGN_SOURCES = {"email", "instagram", "tiktok", "whatsapp", "facebook", "youtube", "other"}
 DEFAULT_ALLOWED_ACCOUNTS = [
     "88996177106",
     "13996855249",
@@ -3188,6 +3190,51 @@ def visitor_cookie_header(visitor_id: str) -> tuple[str, str]:
     return ("Set-Cookie", f"{VISITOR_COOKIE}={urllib.parse.quote(visitor_id)}; Path=/; Max-Age=31536000; SameSite=Lax")
 
 
+def campaign_slug(value: str) -> str:
+    value = str(value or "").lower()
+    return value if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", value) else ""
+
+
+def campaign_cookie_header(touch: dict[str, str], first: dict[str, str] | None = None) -> tuple[str, str]:
+    raw = json.dumps({"first": first or touch, "last": touch}, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    token = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    secret = os.environ.get("KOKO_ATTRIBUTION_SECRET") or ADMIN_PASSWORD
+    signature = hmac.new(secret.encode("utf-8"), token.encode("ascii"), hashlib.sha256).hexdigest()
+    return ("Set-Cookie", f"{ATTRIBUTION_COOKIE}={token}.{signature}; Path=/; Max-Age=7776000; HttpOnly; Secure; SameSite=Lax")
+
+
+def campaign_touch_from_headers(headers: Any) -> dict[str, dict[str, str]] | None:
+    token = cookie_value(headers, ATTRIBUTION_COOKIE)
+    if len(token) > 512 or "." not in token:
+        return None
+    body, signature = token.rsplit(".", 1)
+    secret = os.environ.get("KOKO_ATTRIBUTION_SECRET") or ADMIN_PASSWORD
+    expected = hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return None
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        result = {}
+        for key in ("first", "last"):
+            touch = payload[key]
+            created = parse_iso_time(touch.get("at"))
+            if not created or created < datetime.now(timezone.utc) - timedelta(days=90):
+                return None
+            if touch.get("source") not in CAMPAIGN_SOURCES or not campaign_slug(touch.get("campaign")):
+                return None
+            result[key] = {name: str(touch[name]) for name in ("source", "campaign", "at")}
+        return result
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def bind_campaign_touch(account: dict[str, Any], touch: dict[str, dict[str, str]] | None) -> None:
+    if not touch:
+        return
+    attribution = account.get("attribution") if isinstance(account.get("attribution"), dict) else {}
+    account["attribution"] = {"first": attribution.get("first") or touch["first"], "last": touch["last"]}
+
+
 def record_site_open(headers: Any, path: str, *, account: dict[str, Any] | None = None, script_id: str = "", source: str = "server") -> str:
     visitor_id = analytics_visitor_id(headers)
     page_type = "script" if script_id else "portal"
@@ -3409,6 +3456,82 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
             for week, people in sorted(weekly_people.items(), reverse=True)
         ],
     }
+
+
+def creator_campaign_dashboard_payload(days: int = 30) -> dict[str, Any]:
+    days = max(1, min(90, int(days or 30)))
+    accounts = [item for item in load_accounts() if isinstance(item, dict)]
+    alias_lookup = account_alias_lookup(accounts)
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def row(source: str, campaign: str) -> dict[str, Any]:
+        key = (source, campaign)
+        if key not in rows:
+            rows[key] = {"source": source, "campaign": campaign, "visits": 0, "unique_visitors": set(),
+                         "new_creators": 0, "active_creators": set(), "script_opens": 0, "submissions": 0}
+        return rows[key]
+
+    def account_row(account: dict[str, Any]) -> dict[str, Any] | None:
+        if "666" in account_aliases(account):
+            return None
+        touch = (account.get("attribution") or {}).get("first")
+        if not isinstance(touch, dict):
+            return None
+        source, campaign = touch.get("source"), touch.get("campaign")
+        if source not in CAMPAIGN_SOURCES or not campaign_slug(campaign):
+            return None
+        return row(source, campaign)
+
+    def after_attribution(account: dict[str, Any], value: object) -> bool:
+        first = (account.get("attribution") or {}).get("first") or {}
+        first_at = parse_iso_time(first.get("at"))
+        occurred = parse_iso_time(value)
+        return bool(first_at and occurred and occurred >= first_at)
+
+    for account in accounts:
+        target = account_row(account)
+        first_at = parse_iso_time((account.get("attribution") or {}).get("first", {}).get("at"))
+        if target and first_at and first_at >= datetime.now(timezone.utc) - timedelta(days=days):
+            target["new_creators"] += 1
+
+    for event in load_analytics_events():
+        if not event_in_days(event, days):
+            continue
+        name = str(event.get("event") or "")
+        if name == "campaign_visit":
+            meta = event.get("meta") if isinstance(event.get("meta"), dict) else {}
+            source, campaign = meta.get("source"), meta.get("campaign")
+            if source in CAMPAIGN_SOURCES and campaign_slug(campaign):
+                target = row(source, campaign)
+                target["visits"] += 1
+                if event.get("visitor_id"):
+                    target["unique_visitors"].add(str(event["visitor_id"]))
+        account = find_account_from_lookup(str(event.get("account_id") or ""), alias_lookup)
+        target = account_row(account) if account else None
+        if not target or not after_attribution(account, event.get("created_at")):
+            continue
+        if name and name != "page_duration":
+            target["active_creators"].add(str(account.get("account_id")))
+        if name in {"script_open", "detail_open"} and event.get("script_id"):
+            target["script_opens"] += 1
+
+    submissions = read_json_file(SUBMISSIONS_FILE, [])
+    for submission in submissions if isinstance(submissions, list) else []:
+        if not isinstance(submission, dict) or not event_in_days(submission, days):
+            continue
+        account = find_account_from_lookup(str(submission.get("creator_id") or ""), alias_lookup)
+        target = account_row(account) if account else None
+        if target and after_attribution(account, submission.get("created_at")):
+            target["submissions"] += 1
+
+    result = []
+    for item in rows.values():
+        result.append({**item, "unique_visitors": len(item["unique_visitors"]),
+                       "active_creators": len(item["active_creators"])})
+    result.sort(key=lambda item: (item["visits"], item["new_creators"]), reverse=True)
+    return {"ok": True, "days": days, "generated_at": now_iso(), "rows": result,
+            "summary": {key: sum(item[key] for item in result) for key in
+                        ("visits", "unique_visitors", "new_creators", "script_opens", "submissions")}}
 
 
 def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False) -> dict[str, Any]:
@@ -3846,7 +3969,7 @@ def signup_kwai_profile_url(value: str) -> tuple[str, str]:
     return f"https://www.kwai.com/@{handle}", handle
 
 
-def enter_by_kwai_profile(value: str) -> tuple[dict[str, Any], dict[str, Any], bool]:
+def enter_by_kwai_profile(value: str, campaign_touch: dict[str, dict[str, str]] | None = None) -> tuple[dict[str, Any], dict[str, Any], bool]:
     kwai_url, kwai_id = signup_kwai_profile_url(value)
     normalized_handle = kwai_id.casefold()
     with creator_data_transaction(), SIGNUP_LOCK, ACCOUNTS_CACHE_LOCK:
@@ -3899,6 +4022,7 @@ def enter_by_kwai_profile(value: str) -> tuple[dict[str, Any], dict[str, Any], b
             account["last_login_at"] = now
             account["updated_at"] = now
             accounts[accounts.index(candidates[0])] = account
+        bind_campaign_touch(account, campaign_touch)
         linked_profiles = [
             item for item in profiles
             if str(item.get("account_id") or "") == str(account["account_id"])
@@ -5042,6 +5166,38 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        campaign_match = re.fullmatch(r"/go/([a-z]+)/([a-z0-9_-]+)", parsed.path)
+        if campaign_match:
+            source, campaign = campaign_match.groups()
+            if source not in CAMPAIGN_SOURCES or not campaign_slug(campaign):
+                self.send_error(404)
+                return
+            visitor_id = analytics_visitor_id(self.headers)
+            touch = {"source": source, "campaign": campaign, "at": now_iso()}
+            previous = campaign_touch_from_headers(self.headers)
+            account = current_account(self.headers)
+            try:
+                persist_analytics_events([build_analytics_event(
+                    {"event": "campaign_visit", "path": parsed.path, "page_type": "campaign", "meta": {"source": source, "campaign": campaign}},
+                    self.headers, account=account, visitor_id=visitor_id,
+                )])
+                if account:
+                    with creator_data_transaction(), ACCOUNTS_CACHE_LOCK:
+                        accounts = load_accounts()
+                        match = next((item for item in accounts if str(item.get("account_id")) == str(account.get("account_id"))), None)
+                        if match:
+                            bind_campaign_touch(match, {"first": previous["first"] if previous else touch, "last": touch})
+                            save_accounts(accounts)
+            except Exception:
+                self.send_error(503, "Campaign tracking temporarily unavailable")
+                return
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.send_header("Cache-Control", "no-store")
+            for name, value in (visitor_cookie_header(visitor_id), campaign_cookie_header(touch, previous["first"] if previous else None)):
+                self.send_header(name, value)
+            self.end_headers()
+            return
         if parsed.path in {"/favicon.svg", "/favicon.ico", "/brand/kwai-favicon.svg"}:
             self.send_favicon()
             return
@@ -5269,6 +5425,16 @@ class Handler(BaseHTTPRequestHandler):
                 days = 180
             self.send_json(creator_analytics_summary_payload(days))
             return
+        if parsed.path == "/api/admin/campaign-dashboard":
+            if not self.require_admin():
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                days = max(1, min(90, int((query.get("days") or ["30"])[0])))
+            except (ValueError, TypeError):
+                days = 30
+            self.send_json(creator_campaign_dashboard_payload(days))
+            return
         if parsed.path == "/api/admin/intakes":
             if not self.require_admin():
                 return
@@ -5390,7 +5556,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 payload = self.read_body()
-                account, profile, created = enter_by_kwai_profile(str(payload.get("kwai_url") or ""))
+                account, profile, created = enter_by_kwai_profile(
+                    str(payload.get("kwai_url") or ""), campaign_touch_from_headers(self.headers)
+                )
             except (ValueError, FileExistsError) as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return

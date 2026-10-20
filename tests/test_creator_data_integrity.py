@@ -45,6 +45,69 @@ class CreatorDataIntegrityTests(unittest.TestCase):
         for account, handle in zip((item[0] for item in created), handles):
             self.assertEqual(app.find_account(account["account_id"])["state"]["preferences"]["handle"], handle)
 
+    def test_campaign_cookie_is_signed_and_attribution_survives_reentry(self) -> None:
+        touch = {"source": "email", "campaign": "october", "at": app.now_iso()}
+        cookie = app.campaign_cookie_header(touch)[1].split(";", 1)[0]
+        self.assertEqual(app.campaign_touch_from_headers({"Cookie": cookie}), {"first": touch, "last": touch})
+        self.assertIsNone(app.campaign_touch_from_headers({"Cookie": cookie[:-1] + "x"}))
+        account, _, _ = app.enter_by_kwai_profile("https://kwai.com/@campaign_creator", {"first": touch, "last": touch})
+        second = {"source": "instagram", "campaign": "reels", "at": app.now_iso()}
+        account, _, _ = app.enter_by_kwai_profile("https://kwai.com/@campaign_creator", {"first": touch, "last": second})
+        self.assertEqual(account["attribution"]["first"], touch)
+        self.assertEqual(account["attribution"]["last"], second)
+        app.persist_analytics_events([
+            {"event": "script_open", "script_id": "a" * 32, "account_id": account["account_id"], "created_at": app.now_iso()},
+            {"event": "save_click", "account_id": account["account_id"], "created_at": app.now_iso()},
+        ])
+        app.write_json_atomic(app.SUBMISSIONS_FILE, [
+            {"creator_id": account["account_id"], "created_at": app.now_iso(), "video_url": "https://kwai.com/video/1"}
+        ])
+        dashboard = app.creator_campaign_dashboard_payload(30)
+        self.assertEqual(len(dashboard["rows"]), 1)
+        self.assertEqual(dashboard["rows"][0]["new_creators"], 1)
+        self.assertEqual(dashboard["rows"][0]["active_creators"], 1)
+        self.assertEqual(dashboard["rows"][0]["script_opens"], 1)
+        self.assertEqual(dashboard["rows"][0]["submissions"], 1)
+
+    def test_campaign_link_redirect_and_dashboard(self) -> None:
+        server = app.ResilientThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
+        try:
+            with patch.object(app.Handler, "log_message"):
+                connection.request("GET", "/go/email/october")
+                response = connection.getresponse()
+                response.read()
+                self.assertEqual(response.status, 302)
+                self.assertEqual(response.getheader("Location"), "/")
+                cookies = response.headers.get_all("Set-Cookie") or []
+                self.assertEqual(len(cookies), 2)
+                self.assertTrue(any(app.ATTRIBUTION_COOKIE in item for item in cookies))
+                cookie_header = "; ".join(item.split(";", 1)[0] for item in cookies)
+                with patch.object(app, "schedule_profile_enrichment"):
+                    connection.request(
+                        "POST", "/api/auth/kwai-link",
+                        body=json.dumps({"kwai_url": "https://www.kwai.com/@tracked_creator"}),
+                        headers={"Content-Type": "application/json", "Cookie": cookie_header},
+                    )
+                    entered = connection.getresponse()
+                    entered.read()
+                    self.assertEqual(entered.status, 200)
+                connection.request("GET", "/go/email/bad%2Fpath")
+                invalid = connection.getresponse()
+                invalid.read()
+                self.assertEqual(invalid.status, 404)
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+        dashboard = app.creator_campaign_dashboard_payload(30)
+        self.assertEqual(dashboard["summary"]["visits"], 1)
+        self.assertEqual(dashboard["summary"]["new_creators"], 1)
+        self.assertEqual(dashboard["rows"][0]["source"], "email")
+
     def test_one_hundred_simultaneous_http_entries_keep_cards_and_activity(self) -> None:
         app.AUTH_ATTEMPTS.clear()
         server = app.ResilientThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
