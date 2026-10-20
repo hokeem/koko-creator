@@ -98,15 +98,19 @@ class CreatorDataIntegrityTests(unittest.TestCase):
                 invalid = connection.getresponse()
                 invalid.read()
                 self.assertEqual(invalid.status, 404)
+                connection.request("GET", "/go/inbox/notification")
+                inbox = connection.getresponse()
+                inbox.read()
+                self.assertEqual(inbox.status, 302)
         finally:
             connection.close()
             server.shutdown()
             server.server_close()
             thread.join(timeout=3)
         dashboard = app.creator_campaign_dashboard_payload(30)
-        self.assertEqual(dashboard["summary"]["visits"], 1)
+        self.assertEqual(dashboard["summary"]["visits"], 2)
         self.assertEqual(dashboard["summary"]["new_creators"], 1)
-        self.assertEqual(dashboard["rows"][0]["source"], "email")
+        self.assertEqual({item["source"] for item in dashboard["rows"]}, {"email", "inbox"})
 
     def test_existing_creator_is_not_counted_as_new_and_bot_visit_is_excluded(self) -> None:
         account, _, _ = app.enter_by_kwai_profile("https://kwai.com/@existing_creator")

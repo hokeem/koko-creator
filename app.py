@@ -67,7 +67,7 @@ ADMIN_COOKIE = "koko_creator_admin"
 CREATOR_AUTH_COOKIE = "koko_creator_auth"
 VISITOR_COOKIE = "koko_creator_visitor"
 ATTRIBUTION_COOKIE = "koko_creator_campaign"
-CAMPAIGN_SOURCES = {"email", "instagram", "tiktok", "whatsapp", "facebook", "youtube", "other"}
+CAMPAIGN_SOURCES = {"email", "inbox", "social", "other", "instagram", "tiktok", "whatsapp", "facebook", "youtube"}
 DEFAULT_ALLOWED_ACCOUNTS = [
     "88996177106",
     "13996855249",
