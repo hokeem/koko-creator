@@ -4,7 +4,7 @@ import http.client
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -116,6 +116,9 @@ class CreatorDataIntegrityTests(unittest.TestCase):
         self.assertEqual(dashboard["summary"]["visits"], 3)
         self.assertEqual(dashboard["summary"]["new_creators"], 1)
         self.assertEqual({item["source"] for item in dashboard["rows"]}, {"email", "inbox"})
+        email_row = next(item for item in dashboard["rows"] if item["source"] == "email")
+        self.assertEqual(len(email_row["visit_accounts"]), 1)
+        self.assertEqual(email_row["visit_accounts"][0]["kwai_id"], "tracked_creator")
         self.assertEqual(next(item for item in dashboard["rows"] if item["source"] == "inbox")["visits"], 2)
         month = datetime.now(timezone.utc).astimezone(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m")
         self.assertEqual(app.creator_campaign_dashboard_payload(month=month)["summary"]["visits"], 3)
@@ -143,6 +146,22 @@ class CreatorDataIntegrityTests(unittest.TestCase):
         ])
         self.assertEqual(app.creator_campaign_dashboard_payload(month="2026-09")["summary"]["visits"], 1)
         self.assertEqual(app.creator_campaign_dashboard_payload(month="2026-10")["summary"]["visits"], 1)
+
+    def test_shared_visitor_with_two_accounts_is_not_guessed(self) -> None:
+        first, _, _ = app.enter_by_kwai_profile("https://kwai.com/@creator_one")
+        second, _, _ = app.enter_by_kwai_profile("https://kwai.com/@creator_two")
+        visited_at = datetime.now(timezone.utc)
+        app.persist_analytics_events([
+            {"event": "campaign_visit", "created_at": visited_at.isoformat(), "visitor_id": "shared",
+             "meta": {"source": "inbox", "campaign": "default"}},
+            {"event": "login", "created_at": (visited_at + timedelta(minutes=1)).isoformat(),
+             "visitor_id": "shared", "account_id": first["account_id"]},
+            {"event": "login", "created_at": (visited_at + timedelta(minutes=2)).isoformat(),
+             "visitor_id": "shared", "account_id": second["account_id"]},
+        ])
+        row = app.creator_campaign_dashboard_payload(30)["rows"][0]
+        self.assertEqual(row["visit_accounts"], [])
+        self.assertEqual(row["unidentified_visits"], 1)
 
     def test_one_hundred_simultaneous_http_entries_keep_cards_and_activity(self) -> None:
         app.AUTH_ATTEMPTS.clear()

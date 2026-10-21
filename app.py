@@ -3482,7 +3482,8 @@ def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "") -> di
         key = (source, campaign)
         if key not in rows:
             rows[key] = {"source": source, "campaign": campaign, "visits": 0, "unique_visitors": set(),
-                         "new_creators": 0, "active_creators": set(), "script_opens": 0, "submissions": 0}
+                         "new_creators": 0, "active_creators": set(), "script_opens": 0, "submissions": 0,
+                         "visit_accounts": {}, "unidentified_visits": 0}
         return rows[key]
 
     def account_row(account: dict[str, Any]) -> dict[str, Any] | None:
@@ -3510,7 +3511,17 @@ def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "") -> di
                 and in_period(first_at)):
             target["new_creators"] += 1
 
-    for event in load_analytics_events():
+    events = load_analytics_events()
+    visitor_logins: dict[str, list[tuple[datetime, dict[str, Any]]]] = {}
+    for event in events:
+        if event.get("event") != "login" or not event.get("visitor_id"):
+            continue
+        account = find_account_from_lookup(str(event.get("account_id") or ""), alias_lookup)
+        logged_in_at = parse_iso_time(event.get("created_at"))
+        if account and logged_in_at and "666" not in account_aliases(account):
+            visitor_logins.setdefault(str(event["visitor_id"]), []).append((logged_in_at, account))
+
+    for event in events:
         if not in_period(event.get("created_at")):
             continue
         name = str(event.get("event") or "")
@@ -3523,8 +3534,36 @@ def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "") -> di
             if source in CAMPAIGN_SOURCES and campaign_slug(campaign):
                 target = row(source, campaign)
                 target["visits"] += 1
-                if event.get("visitor_id"):
-                    target["unique_visitors"].add(str(event["visitor_id"]))
+                visitor_id = str(event.get("visitor_id") or "")
+                if visitor_id:
+                    target["unique_visitors"].add(visitor_id)
+                visit_account = find_account_from_lookup(str(event.get("account_id") or ""), alias_lookup)
+                if not visit_account and visitor_id:
+                    visited_at = parse_iso_time(event.get("created_at"))
+                    if visited_at:
+                        nearby_logins = [
+                            (logged_in_at, account)
+                            for logged_in_at, account in visitor_logins.get(visitor_id, [])
+                            if visited_at - timedelta(hours=24) <= logged_in_at <= visited_at + timedelta(hours=24)
+                        ]
+                        matches = {
+                            str(account.get("account_id") or ""): account
+                            for _, account in nearby_logins
+                        }
+                        if len(matches) == 1 and any(logged_in_at >= visited_at for logged_in_at, _ in nearby_logins):
+                            visit_account = next(iter(matches.values()))
+                if visit_account and "666" not in account_aliases(visit_account):
+                    account_id = str(visit_account.get("account_id") or "")
+                    person = target["visit_accounts"].setdefault(account_id, {
+                        "account_id": account_id,
+                        "display_name": str(visit_account.get("display_name") or account_id),
+                        "kwai_id": str(visit_account.get("kwai_id") or ""),
+                        "visits": 0, "last_visit": "",
+                    })
+                    person["visits"] += 1
+                    person["last_visit"] = max(person["last_visit"], str(event.get("created_at") or ""))
+                else:
+                    target["unidentified_visits"] += 1
         account = find_account_from_lookup(str(event.get("account_id") or ""), alias_lookup)
         target = account_row(account) if account else None
         if not target or not after_attribution(account, event.get("created_at")):
@@ -3546,7 +3585,8 @@ def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "") -> di
     result = []
     for item in rows.values():
         result.append({**item, "unique_visitors": len(item["unique_visitors"]),
-                       "active_creators": len(item["active_creators"])})
+                       "active_creators": len(item["active_creators"]),
+                       "visit_accounts": sorted(item["visit_accounts"].values(), key=lambda person: (-person["visits"], person["account_id"]))})
     result.sort(key=lambda item: (item["visits"], item["new_creators"]), reverse=True)
     return {"ok": True, "days": days, "month": month, "generated_at": now_iso(), "rows": result,
             "summary": {key: sum(item[key] for item in result) for key in
