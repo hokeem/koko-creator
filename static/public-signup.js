@@ -6,6 +6,7 @@
   setAuthMode = function () {
     originalSetAuthMode("login");
     authMode = "kwai_link";
+    form.noValidate = true;
     const portuguese = lang !== "zh";
     const input = document.querySelector("#auth-phone");
     input.name = "kwai_url";
@@ -54,6 +55,10 @@
     if (button.disabled) return;
     const kwai_url = document.querySelector("#auth-phone").value.trim();
     const portuguese = lang !== "zh";
+    if (!kwai_url) {
+      setAuthStatus(portuguese ? "Cole o link do seu perfil no Kwai para continuar." : "请粘贴 Kwai 主页链接后继续。", "error");
+      return;
+    }
     setButtonBusy(button, true, portuguese ? "Identificando seu perfil..." : "正在识别主页...");
     setAuthStatus(portuguese ? "Preparando seu espaço na Koko..." : "正在准备你的 Koko 页面...", "loading");
     try {

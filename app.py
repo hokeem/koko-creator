@@ -5166,7 +5166,7 @@ document.querySelector("#auth-form").addEventListener("submit",handleAuthSubmit)
 document.querySelector("#profile-avatar-input")?.addEventListener("change",e=>handleProfileImage("avatar",e.target.files?.[0]));
 document.querySelector("#profile-cover-input")?.addEventListener("change",e=>handleProfileImage("cover",e.target.files?.[0]));
 async function bootstrap(){{if(creatorUser){{await loadAccountState();resetRepeatableTestFlow()}}applyLang();setAuthMode("login");show(isRepeatableTestAccount()?"choose":forceLanding?"home":initialScriptId?"dashboard":creatorUser&&hasProfile()?"dashboard":"home");track("page_view",{{source:initialScriptId?"share_script":"portal"}});if(initialScriptId&&!isRepeatableTestAccount()){{openDetail(initialScriptId);if(!creatorUser)setTimeout(()=>openAuth("login"),260)}}if(creatorUser&&!isRepeatableTestAccount())setTimeout(()=>requireKwaiProfile(initialScriptId?"share_script_open":"portal_open"),180)}}bootstrap();
-</script><link rel="stylesheet" href="/static/public-signup.css?v=kwai-link-1"><script src="/static/public-signup.js?v=kwai-link-1"></script></body></html>"""
+</script><link rel="stylesheet" href="/static/public-signup.css?v=kwai-link-1"><script src="/static/public-signup.js?v=kwai-link-2"></script></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -5284,7 +5284,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Cache-Control", "no-cache" if name == "public-signup.js" else "public, max-age=86400")
             self.end_headers()
             self.wfile.write(raw)
             return
@@ -5305,7 +5305,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path in {"/", "/creator-portal"}:
             visitor_id = record_site_open(self.headers, self.path, account=current_account(self.headers), source="document")
-            self.send_html(page_html(), headers=[visitor_cookie_header(visitor_id)])
+            self.send_html(page_html(), headers=[visitor_cookie_header(visitor_id), ("Cache-Control", "no-store")])
             return
         if parsed.path in {"/creator-survey", "/creator-intake"}:
             self.send_html(survey_html())
@@ -5404,7 +5404,7 @@ class Handler(BaseHTTPRequestHandler):
             script_match = re.fullmatch(r"/script/([0-9a-f]{32})", parsed.path)
             script_id = script_match.group(1) if script_match else ""
             visitor_id = record_site_open(self.headers, self.path, account=current_account(self.headers), script_id=script_id, source="script_link")
-            self.send_html(page_html(), headers=[visitor_cookie_header(visitor_id)])
+            self.send_html(page_html(), headers=[visitor_cookie_header(visitor_id), ("Cache-Control", "no-store")])
             return
         if parsed.path.startswith("/api/creator/scripts/"):
             entry_id = parsed.path.rsplit("/", 1)[-1]
