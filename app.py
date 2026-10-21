@@ -3458,13 +3458,27 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
     }
 
 
-def creator_campaign_dashboard_payload(days: int = 30) -> dict[str, Any]:
+def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "") -> dict[str, Any]:
     days = max(1, min(90, int(days or 30)))
+    if month and not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", month):
+        raise ValueError("Invalid campaign month")
+    brazil_tz = ZoneInfo("America/Sao_Paulo")
+
+    def in_period(value: object) -> bool:
+        created = parse_iso_time(value)
+        if not created:
+            return False
+        if month:
+            return created.astimezone(brazil_tz).strftime("%Y-%m") == month
+        return created >= datetime.now(timezone.utc) - timedelta(days=days)
+
     accounts = [item for item in load_accounts() if isinstance(item, dict)]
     alias_lookup = account_alias_lookup(accounts)
     rows: dict[tuple[str, str], dict[str, Any]] = {}
 
     def row(source: str, campaign: str) -> dict[str, Any]:
+        if source == "inbox":
+            campaign = "default"
         key = (source, campaign)
         if key not in rows:
             rows[key] = {"source": source, "campaign": campaign, "visits": 0, "unique_visitors": set(),
@@ -3493,11 +3507,11 @@ def creator_campaign_dashboard_payload(days: int = 30) -> dict[str, Any]:
         first_at = parse_iso_time((account.get("attribution") or {}).get("first", {}).get("at"))
         account_created = parse_iso_time(account.get("created_at"))
         if (target and first_at and account_created and account_created >= first_at
-                and first_at >= datetime.now(timezone.utc) - timedelta(days=days)):
+                and in_period(first_at)):
             target["new_creators"] += 1
 
     for event in load_analytics_events():
-        if not event_in_days(event, days):
+        if not in_period(event.get("created_at")):
             continue
         name = str(event.get("event") or "")
         if name == "campaign_visit":
@@ -3522,7 +3536,7 @@ def creator_campaign_dashboard_payload(days: int = 30) -> dict[str, Any]:
 
     submissions = read_json_file(SUBMISSIONS_FILE, [])
     for submission in submissions if isinstance(submissions, list) else []:
-        if not isinstance(submission, dict) or not event_in_days(submission, days):
+        if not isinstance(submission, dict) or not in_period(submission.get("created_at")):
             continue
         account = find_account_from_lookup(str(submission.get("creator_id") or ""), alias_lookup)
         target = account_row(account) if account else None
@@ -3534,7 +3548,7 @@ def creator_campaign_dashboard_payload(days: int = 30) -> dict[str, Any]:
         result.append({**item, "unique_visitors": len(item["unique_visitors"]),
                        "active_creators": len(item["active_creators"])})
     result.sort(key=lambda item: (item["visits"], item["new_creators"]), reverse=True)
-    return {"ok": True, "days": days, "generated_at": now_iso(), "rows": result,
+    return {"ok": True, "days": days, "month": month, "generated_at": now_iso(), "rows": result,
             "summary": {key: sum(item[key] for item in result) for key in
                         ("visits", "unique_visitors", "new_creators", "script_opens", "submissions")}}
 
@@ -5172,8 +5186,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         campaign_match = re.fullmatch(r"/go/([a-z]+)/([a-z0-9_-]+)", parsed.path)
-        if campaign_match:
+        if parsed.path == "/inbox":
+            source, campaign = "inbox", "default"
+        elif campaign_match:
             source, campaign = campaign_match.groups()
+        else:
+            source = campaign = ""
+        if source:
             if source not in CAMPAIGN_SOURCES or not campaign_slug(campaign):
                 self.send_error(404)
                 return
@@ -5438,7 +5457,13 @@ class Handler(BaseHTTPRequestHandler):
                 days = max(1, min(90, int((query.get("days") or ["30"])[0])))
             except (ValueError, TypeError):
                 days = 30
-            self.send_json(creator_campaign_dashboard_payload(days))
+            month = (query.get("month") or [""])[0]
+            try:
+                payload = creator_campaign_dashboard_payload(days, month=month)
+            except ValueError:
+                self.send_json({"error": "Invalid month"}, status=400)
+                return
+            self.send_json(payload)
             return
         if parsed.path == "/api/admin/intakes":
             if not self.require_admin():

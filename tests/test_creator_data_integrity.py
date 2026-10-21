@@ -102,15 +102,25 @@ class CreatorDataIntegrityTests(unittest.TestCase):
                 inbox = connection.getresponse()
                 inbox.read()
                 self.assertEqual(inbox.status, 302)
+                connection.request("GET", "/inbox")
+                fixed_inbox = connection.getresponse()
+                fixed_inbox.read()
+                self.assertEqual(fixed_inbox.status, 302)
+                self.assertEqual(fixed_inbox.getheader("Location"), "/")
         finally:
             connection.close()
             server.shutdown()
             server.server_close()
             thread.join(timeout=3)
         dashboard = app.creator_campaign_dashboard_payload(30)
-        self.assertEqual(dashboard["summary"]["visits"], 2)
+        self.assertEqual(dashboard["summary"]["visits"], 3)
         self.assertEqual(dashboard["summary"]["new_creators"], 1)
         self.assertEqual({item["source"] for item in dashboard["rows"]}, {"email", "inbox"})
+        self.assertEqual(next(item for item in dashboard["rows"] if item["source"] == "inbox")["visits"], 2)
+        month = datetime.now(timezone.utc).astimezone(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m")
+        self.assertEqual(app.creator_campaign_dashboard_payload(month=month)["summary"]["visits"], 3)
+        with self.assertRaises(ValueError):
+            app.creator_campaign_dashboard_payload(month="not-a-month")
 
     def test_existing_creator_is_not_counted_as_new_and_bot_visit_is_excluded(self) -> None:
         account, _, _ = app.enter_by_kwai_profile("https://kwai.com/@existing_creator")
@@ -123,6 +133,16 @@ class CreatorDataIntegrityTests(unittest.TestCase):
         dashboard = app.creator_campaign_dashboard_payload(30)
         self.assertEqual(dashboard["rows"][0]["new_creators"], 0)
         self.assertEqual(dashboard["rows"][0]["visits"], 0)
+
+    def test_campaign_month_uses_brazilian_calendar_boundary(self) -> None:
+        app.persist_analytics_events([
+            {"event": "campaign_visit", "created_at": "2026-10-01T01:00:00+00:00", "visitor_id": "sep",
+             "meta": {"source": "inbox", "campaign": "september"}},
+            {"event": "campaign_visit", "created_at": "2026-10-01T04:00:00+00:00", "visitor_id": "oct",
+             "meta": {"source": "inbox", "campaign": "default"}},
+        ])
+        self.assertEqual(app.creator_campaign_dashboard_payload(month="2026-09")["summary"]["visits"], 1)
+        self.assertEqual(app.creator_campaign_dashboard_payload(month="2026-10")["summary"]["visits"], 1)
 
     def test_one_hundred_simultaneous_http_entries_keep_cards_and_activity(self) -> None:
         app.AUTH_ATTEMPTS.clear()
