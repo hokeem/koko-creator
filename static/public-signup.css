@@ -3,11 +3,14 @@
 .auth-card input[hidden], .auth-card textarea[hidden] { display: none !important; }
 .auth-guide[hidden], .auth-switch[hidden] { display: none !important; }
 .auth-card #auth-phone { margin-bottom: 8px; }
-.auth-card .auth-login-hint { color: #484c55; line-height: 1.55; }
+.auth-card .auth-login-hint { color: #484c55; line-height: 1.4; margin: 0 0 12px; }
 .auth-card .auth-login-hint strong { color: #eb5c00; }
 .auth-link-note { margin: 0 0 22px; color: #747982; font-size: 13px; line-height: 1.45; }
+.kwai-copy-guide { position: relative; display: block; margin: 0 0 14px; overflow: hidden; border: 1px solid #f3e6dd; border-radius: 16px; background: #f7f4f1; }
+.kwai-copy-guide img { display: block; width: 100%; height: auto; aspect-ratio: 602 / 506; object-fit: contain; }
+.kwai-copy-guide span { position: absolute; right: 8px; bottom: 8px; padding: 5px 9px; border: 1px solid #f3b17e; border-radius: 999px; background: #fff0e3; color: #a94708; font-size: 11px; font-weight: 800; box-shadow: 0 2px 8px #5926001c; }
 @media (max-width: 420px) {
   .auth-overlay { padding: 12px; }
-  .auth-card { width: 100%; padding: 28px 20px; max-height: calc(100dvh - 24px); }
-  .auth-card h2 { font-size: 28px; margin-bottom: 18px; }
+  .auth-card { width: 100%; padding: 24px 20px; max-height: calc(100dvh - 24px); }
+  .auth-card h2 { font-size: 26px; margin-bottom: 14px; }
 }

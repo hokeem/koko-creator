@@ -5166,7 +5166,7 @@ document.querySelector("#auth-form").addEventListener("submit",handleAuthSubmit)
 document.querySelector("#profile-avatar-input")?.addEventListener("change",e=>handleProfileImage("avatar",e.target.files?.[0]));
 document.querySelector("#profile-cover-input")?.addEventListener("change",e=>handleProfileImage("cover",e.target.files?.[0]));
 async function bootstrap(){{if(creatorUser){{await loadAccountState();resetRepeatableTestFlow()}}applyLang();setAuthMode("login");show(isRepeatableTestAccount()?"choose":forceLanding?"home":initialScriptId?"dashboard":creatorUser&&hasProfile()?"dashboard":"home");track("page_view",{{source:initialScriptId?"share_script":"portal"}});if(initialScriptId&&!isRepeatableTestAccount()){{openDetail(initialScriptId);if(!creatorUser)setTimeout(()=>openAuth("login"),260)}}if(creatorUser&&!isRepeatableTestAccount())setTimeout(()=>requireKwaiProfile(initialScriptId?"share_script_open":"portal_open"),180)}}bootstrap();
-</script><link rel="stylesheet" href="/static/public-signup.css?v=kwai-link-1"><script src="/static/public-signup.js?v=kwai-link-2"></script></body></html>"""
+</script><link rel="stylesheet" href="/static/public-signup.css?v=kwai-link-2"><script src="/static/public-signup.js?v=kwai-link-3"></script></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):

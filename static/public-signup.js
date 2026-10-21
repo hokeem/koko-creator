@@ -13,7 +13,7 @@
     input.type = "text";
     input.inputMode = "url";
     input.autocomplete = "url";
-    input.placeholder = portuguese ? "Cole o link ou a mensagem compartilhada do Kwai" : "粘贴 Kwai 主页分享链接或整段分享文字";
+    input.placeholder = portuguese ? "Cole aqui o link do seu perfil Kwai" : "粘贴 Kwai 个人主页链接";
     input.required = true;
     const password = document.querySelector("#auth-password");
     if (password) {
@@ -25,23 +25,28 @@
     document.querySelector("#auth-guide").hidden = true;
     document.querySelector(".auth-switch").hidden = true;
     document.querySelector("#auth-back").classList.remove("active");
-    document.querySelector("#auth-title").textContent = portuguese ? "Entre com seu perfil do Kwai" : "使用 Kwai 主页进入";
+    document.querySelector("#auth-title").textContent = portuguese ? "Copie o link do seu perfil Kwai" : "复制 Kwai 个人主页链接";
     document.querySelector("#auth-submit").textContent = portuguese ? "Continuar com meu perfil" : "使用主页链接进入";
     const hint = document.querySelector("#auth-login-hint");
     hint.hidden = false;
     hint.innerHTML = portuguese
-      ? "Cole o link público do <strong>seu perfil</strong> no Kwai. A Koko usa esse endereço para reunir seus roteiros e vídeos enviados. Não pedimos sua senha do Kwai."
-      : "粘贴你的 Kwai 作者主页公开链接。Koko 会用它归集脚本与回传视频，不会要求你的 Kwai 密码。";
-    let note = document.querySelector("#auth-link-note");
-    if (!note) {
-      note = document.createElement("p");
-      note.id = "auth-link-note";
-      note.className = "auth-link-note";
-      input.after(note);
+      ? "No Kwai, abra seu perfil e toque em <strong>Compartilhar → Copiar link</strong>."
+      : "打开 Kwai 个人主页，点击<strong>分享 → 复制链接</strong>。";
+    input.before(hint);
+    let guide = document.querySelector("#kwai-copy-guide");
+    if (!guide) {
+      guide = document.createElement("a");
+      guide.id = "kwai-copy-guide";
+      guide.className = "kwai-copy-guide";
+      guide.href = "/static/kwai-copy-profile-guide.png";
+      guide.target = "_blank";
+      guide.rel = "noopener";
+      guide.setAttribute("aria-label", portuguese ? "Ver imagem completa: toque em Compartilhar e Copiar link no Kwai" : "查看完整示意图：在 Kwai 点击分享并复制链接");
+      guide.innerHTML = '<img src="/static/kwai-copy-link-steps.png" alt="Kwai: Compartilhar, Copy Link e Cancel"><span></span>';
+      input.before(guide);
     }
-    note.textContent = portuguese
-      ? "Pode colar a mensagem inteira de compartilhamento do perfil. Links de vídeos não são aceitos. O link não confirma a titularidade do perfil."
-      : "可以粘贴整段主页分享文字；视频链接不能用于进入。公开链接无法验证主页归属。";
+    guide.querySelector("span").textContent = portuguese ? "Toque na imagem para ampliar" : "点击图片查看大图";
+    document.querySelector("#auth-link-note")?.remove();
     document.querySelectorAll('.landing [data-auth-open="login"]').forEach(button => {
       button.textContent = portuguese ? "Entrar com meu perfil Kwai" : "使用 Kwai 主页进入";
     });
