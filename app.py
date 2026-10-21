@@ -4014,14 +4014,22 @@ def normalize_kwai_url(url: str) -> str:
 
 
 def signup_kwai_profile_url(value: str) -> tuple[str, str]:
-    parsed = urllib.parse.urlparse(normalize_kwai_url(value))
+    text = str(value or "").strip()
+    links = re.findall(r"https?://[^\s<>\"']+", text, re.I)
+    if len(links) > 1:
+        raise ValueError("Cole apenas um link de perfil do Kwai.")
+    candidate = links[0].rstrip(".,!?)）") if links else text
+    parsed = urllib.parse.urlparse(normalize_kwai_url(candidate))
     try:
         port = parsed.port
     except ValueError as exc:
         raise ValueError("Informe o link HTTPS do seu perfil no Kwai.") from exc
-    if parsed.scheme != "https" or parsed.hostname not in {"kwai.com", "www.kwai.com", "m.kwai.com"} or port not in {None, 443} or parsed.username or parsed.password:
+    if parsed.scheme != "https" or parsed.hostname not in {"kwai.com", "www.kwai.com", "m.kwai.com", "k.kwai.com"} or port not in {None, 443} or parsed.username or parsed.password:
         raise ValueError("Informe o link HTTPS do seu perfil no Kwai.")
-    match = re.fullmatch(r"/@([A-Za-z0-9_.-]{2,120})/?", parsed.path)
+    if parsed.hostname == "k.kwai.com":
+        match = re.fullmatch(r"/u/@([A-Za-z0-9_.-]{2,120})/[A-Za-z0-9_-]{4,120}/?", parsed.path)
+    else:
+        match = re.fullmatch(r"/@([A-Za-z0-9_.-]{2,120})/?", parsed.path)
     if not match:
         raise ValueError("Use o link do perfil, por exemplo https://www.kwai.com/@seu_id.")
     handle = normalize_kwai_id(match.group(1))

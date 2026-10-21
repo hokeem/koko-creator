@@ -13,6 +13,24 @@ import app
 
 
 class CreatorDataIntegrityTests(unittest.TestCase):
+    def test_kwai_shared_profile_message_matches_canonical_account(self) -> None:
+        original, _, created = app.enter_by_kwai_profile("https://www.kwai.com/@humorsemlimite174")
+        self.assertTrue(created)
+        pasted = "这个vlogger分享了很多很酷的视频，快来看看! \n https://k.kwai.com/u/@humorsemlimite174/DFfmC2ZO"
+        account, profile, created = app.enter_by_kwai_profile(pasted)
+        self.assertFalse(created)
+        self.assertEqual(account["account_id"], original["account_id"])
+        self.assertEqual(profile["kwai_id"], "humorsemlimite174")
+        self.assertEqual(app.signup_kwai_profile_url(pasted)[0], "https://www.kwai.com/@humorsemlimite174")
+        for invalid in (
+            "https://k.kwai.com/u/@humorsemlimite174/video/123",
+            "https://www.kwai.com/@humorsemlimite174/video/123",
+            "https://evil.example/u/@humorsemlimite174/DFfmC2ZO",
+            "https://k.kwai.com/u/@first/ABC123 https://k.kwai.com/u/@second/DEF456",
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                app.signup_kwai_profile_url(invalid)
+
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         root = Path(self.directory.name)
@@ -88,7 +106,7 @@ class CreatorDataIntegrityTests(unittest.TestCase):
                 with patch.object(app, "schedule_profile_enrichment"):
                     connection.request(
                         "POST", "/api/auth/kwai-link",
-                        body=json.dumps({"kwai_url": "https://www.kwai.com/@tracked_creator"}),
+                        body=json.dumps({"kwai_url": "Perfil no Kwai:\nhttps://k.kwai.com/u/@tracked_creator/DFfmC2ZO"}),
                         headers={"Content-Type": "application/json", "Cookie": cookie_header},
                     )
                     entered = connection.getresponse()

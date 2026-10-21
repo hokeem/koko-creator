@@ -9,10 +9,10 @@
     const portuguese = lang !== "zh";
     const input = document.querySelector("#auth-phone");
     input.name = "kwai_url";
-    input.type = "url";
+    input.type = "text";
     input.inputMode = "url";
     input.autocomplete = "url";
-    input.placeholder = "https://www.kwai.com/@seu_perfil";
+    input.placeholder = portuguese ? "Cole o link ou a mensagem compartilhada do Kwai" : "粘贴 Kwai 主页分享链接或整段分享文字";
     input.required = true;
     const password = document.querySelector("#auth-password");
     if (password) {
@@ -39,8 +39,8 @@
       input.after(note);
     }
     note.textContent = portuguese
-      ? "Use o endereço do perfil (@usuário), não o link de um vídeo. O link não confirma a titularidade do perfil."
-      : "请使用 @作者 的主页链接，不是视频链接。公开链接无法验证主页归属。";
+      ? "Pode colar a mensagem inteira de compartilhamento do perfil. Links de vídeos não são aceitos. O link não confirma a titularidade do perfil."
+      : "可以粘贴整段主页分享文字；视频链接不能用于进入。公开链接无法验证主页归属。";
     document.querySelectorAll('.landing [data-auth-open="login"]').forEach(button => {
       button.textContent = portuguese ? "Entrar com meu perfil Kwai" : "使用 Kwai 主页进入";
     });
