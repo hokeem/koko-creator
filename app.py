@@ -123,6 +123,8 @@ AUTH_ATTEMPTS: dict[str, list[float]] = {}
 PROFILE_ENRICH_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="kwai-profile")
 PROFILE_ENRICH_LOCK = threading.Lock()
 PROFILE_ENRICH_PENDING: set[str] = set()
+CAMPAIGN_DASHBOARD_LOCK = threading.Lock()
+CAMPAIGN_DASHBOARD_CACHE: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
 
 
 QUESTIONS = [
@@ -3458,15 +3460,20 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
     }
 
 
-def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "") -> dict[str, Any]:
+def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "", since: str = "") -> dict[str, Any]:
     days = max(1, min(90, int(days or 30)))
     if month and not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", month):
         raise ValueError("Invalid campaign month")
+    since_at = parse_iso_time(since) if since else None
+    if since and not since_at:
+        raise ValueError("Invalid campaign start time")
     brazil_tz = ZoneInfo("America/Sao_Paulo")
 
     def in_period(value: object) -> bool:
         created = parse_iso_time(value)
         if not created:
+            return False
+        if since_at and created < since_at:
             return False
         if month:
             return created.astimezone(brazil_tz).strftime("%Y-%m") == month
@@ -3483,7 +3490,7 @@ def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "") -> di
         if key not in rows:
             rows[key] = {"source": source, "campaign": campaign, "visits": 0, "unique_visitors": set(),
                          "new_creators": 0, "active_creators": set(), "script_opens": 0, "submissions": 0,
-                         "visit_accounts": {}, "unidentified_visits": 0}
+                         "visit_accounts": {}, "unidentified_visits": 0, "new_creator_accounts": {}}
         return rows[key]
 
     def account_row(account: dict[str, Any]) -> dict[str, Any] | None:
@@ -3510,6 +3517,15 @@ def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "") -> di
         if (target and first_at and account_created and account_created >= first_at
                 and in_period(first_at)):
             target["new_creators"] += 1
+            account_id = str(account.get("account_id") or "")
+            target["new_creator_accounts"][account_id] = {
+                "account_id": account_id,
+                "display_name": str(account.get("display_name") or account_id),
+                "kwai_id": str(account.get("kwai_id") or ""),
+                "registered_at": str(account.get("registered_at") or account.get("created_at") or ""),
+                "script_opens": 0,
+                "submissions": 0,
+            }
 
     events = load_analytics_events()
     visitor_logins: dict[str, list[tuple[datetime, dict[str, Any]]]] = {}
@@ -3572,6 +3588,9 @@ def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "") -> di
             target["active_creators"].add(str(account.get("account_id")))
         if name in {"script_open", "detail_open"} and event.get("script_id"):
             target["script_opens"] += 1
+            newcomer = target["new_creator_accounts"].get(str(account.get("account_id") or ""))
+            if newcomer is not None:
+                newcomer["script_opens"] += 1
 
     submissions = read_json_file(SUBMISSIONS_FILE, [])
     for submission in submissions if isinstance(submissions, list) else []:
@@ -3581,16 +3600,31 @@ def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "") -> di
         target = account_row(account) if account else None
         if target and after_attribution(account, submission.get("created_at")):
             target["submissions"] += 1
+            newcomer = target["new_creator_accounts"].get(str(account.get("account_id") or ""))
+            if newcomer is not None:
+                newcomer["submissions"] += 1
 
     result = []
     for item in rows.values():
         result.append({**item, "unique_visitors": len(item["unique_visitors"]),
                        "active_creators": len(item["active_creators"]),
-                       "visit_accounts": sorted(item["visit_accounts"].values(), key=lambda person: (-person["visits"], person["account_id"]))})
+                       "visit_accounts": sorted(item["visit_accounts"].values(), key=lambda person: (-person["visits"], person["account_id"])),
+                       "new_creator_accounts": sorted(item["new_creator_accounts"].values(), key=lambda person: (person["registered_at"], person["account_id"]))})
     result.sort(key=lambda item: (item["visits"], item["new_creators"]), reverse=True)
-    return {"ok": True, "days": days, "month": month, "generated_at": now_iso(), "rows": result,
+    return {"ok": True, "days": days, "month": month, "since": since, "generated_at": now_iso(), "rows": result,
             "summary": {key: sum(item[key] for item in result) for key in
                         ("visits", "unique_visitors", "new_creators", "script_opens", "submissions")}}
+
+
+def cached_creator_campaign_dashboard_payload(days: int = 30, *, month: str = "", since: str = "") -> dict[str, Any]:
+    key = (days, month, since)
+    with CAMPAIGN_DASHBOARD_LOCK:
+        cached = CAMPAIGN_DASHBOARD_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < 30:
+            return cached[1]
+        payload = creator_campaign_dashboard_payload(days, month=month, since=since)
+        CAMPAIGN_DASHBOARD_CACHE[key] = (time.monotonic(), payload)
+        return payload
 
 
 def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False) -> dict[str, Any]:
@@ -5506,10 +5540,11 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 days = 30
             month = (query.get("month") or [""])[0]
+            since = (query.get("since") or [""])[0]
             try:
-                payload = creator_campaign_dashboard_payload(days, month=month)
+                payload = cached_creator_campaign_dashboard_payload(days, month=month, since=since)
             except ValueError:
-                self.send_json({"error": "Invalid month"}, status=400)
+                self.send_json({"error": "Invalid campaign period"}, status=400)
                 return
             self.send_json(payload)
             return

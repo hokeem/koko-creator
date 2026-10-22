@@ -43,11 +43,13 @@ class CreatorDataIntegrityTests(unittest.TestCase):
         for item in self.patches:
             item.start()
         app.ACCOUNTS_CACHE.update(signature=None, accounts=[])
+        app.CAMPAIGN_DASHBOARD_CACHE.clear()
 
     def tearDown(self) -> None:
         for item in reversed(self.patches):
             item.stop()
         app.ACCOUNTS_CACHE.update(signature=None, accounts=[])
+        app.CAMPAIGN_DASHBOARD_CACHE.clear()
         self.directory.cleanup()
 
     def test_one_hundred_creators_register_and_update_without_overwriting(self) -> None:
@@ -86,6 +88,26 @@ class CreatorDataIntegrityTests(unittest.TestCase):
         self.assertEqual(dashboard["rows"][0]["active_creators"], 1)
         self.assertEqual(dashboard["rows"][0]["script_opens"], 1)
         self.assertEqual(dashboard["rows"][0]["submissions"], 1)
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        future_rows = app.creator_campaign_dashboard_payload(30, since=future)["rows"]
+        self.assertEqual(sum(row["new_creators"] + row["script_opens"] + row["submissions"] for row in future_rows), 0)
+        with self.assertRaises(ValueError):
+            app.creator_campaign_dashboard_payload(30, since="not-a-date")
+        self.assertEqual(dashboard["rows"][0]["new_creator_accounts"], [{
+            "account_id": account["account_id"],
+            "display_name": account["display_name"],
+            "kwai_id": account["kwai_id"],
+            "registered_at": account["registered_at"],
+            "script_opens": 1,
+            "submissions": 1,
+        }])
+
+    def test_campaign_dashboard_reuses_a_single_recent_snapshot(self) -> None:
+        with patch.object(app, "creator_campaign_dashboard_payload", return_value={"ok": True}) as build:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(lambda _: app.cached_creator_campaign_dashboard_payload(month="2026-10"), range(8)))
+        self.assertEqual(results, [{"ok": True}] * 8)
+        build.assert_called_once_with(30, month="2026-10", since="")
 
     def test_campaign_link_redirect_and_dashboard(self) -> None:
         server = app.ResilientThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
