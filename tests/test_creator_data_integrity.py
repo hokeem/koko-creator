@@ -250,6 +250,25 @@ class CreatorDataIntegrityTests(unittest.TestCase):
         self.assertEqual(len({item["submission_id"] for item in submitted}), 100)
         self.assertEqual(len(app.read_json_file(app.SUBMISSIONS_FILE, [])), 100)
 
+    def test_reference_video_cannot_be_submitted_as_a_remake(self) -> None:
+        script_id = "a" * 32
+        reference = "https://www.kwai.com/@original/video/5209970453127473266?share=1"
+        with patch.object(app, "entry_by_id", return_value={"entry_id": script_id, "video_url": reference, "title": "Test"}):
+            for video_url in (reference, "https://kwai.com/@someone_else/video/5209970453127473266"):
+                with self.subTest(video_url=video_url), self.assertRaises(app.ReferenceVideoSubmissionError):
+                    app.save_submission({"entry_id": script_id, "video_url": video_url}, account={"account_id": "creator"})
+        self.assertFalse(app.SUBMISSIONS_FILE.exists())
+        self.assertFalse(app.is_reference_video_submission(
+            "https://kwai.com/@creator/video/999", reference,
+        ))
+
+    def test_creator_script_does_not_render_reference_link(self) -> None:
+        html = app.page_html()
+        self.assertIn('const brief=d.main?mainContentCard(d.main):""', html)
+        self.assertNotIn('<div class="brief-card source-card"><b>Vídeo original</b>', html)
+        self.assertNotIn('target="_blank" rel="noopener">Abrir vídeo', html)
+        self.assertIn('reference_video_submission', html)
+
     def test_submissions_are_not_truncated_after_one_thousand(self) -> None:
         script_id = "b" * 32
         existing = [{"submission_id": str(index), "creator_id": f"old_{index}", "video_url": f"https://kwai.com/video/{index}"} for index in range(1000)]
