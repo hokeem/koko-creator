@@ -262,6 +262,54 @@ class CreatorDataIntegrityTests(unittest.TestCase):
             "https://kwai.com/@creator/video/999", reference,
         ))
 
+    def test_submission_review_requires_reason_and_persists_result(self) -> None:
+        submission_id = "a" * 32
+        app.write_json_atomic(app.SUBMISSIONS_FILE, [{"submission_id": submission_id, "status": "pending_review", "creator_id": "creator"}])
+        with self.assertRaisesRegex(ValueError, "reason"):
+            app.review_submission(submission_id, "rejected")
+        rejected = app.review_submission(submission_id, "rejected", "O vídeo não segue o roteiro.")
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertEqual(rejected["review_reason"], "O vídeo não segue o roteiro.")
+        approved = app.review_submission(submission_id, "approved")
+        self.assertEqual(approved["status"], "approved")
+        self.assertEqual(approved["review_reason"], "")
+        self.assertTrue(approved["reviewed_at"])
+        self.assertEqual(app.read_json_file(app.SUBMISSIONS_FILE, [])[0]["status"], "approved")
+
+    def test_review_api_filters_status_and_requires_admin(self) -> None:
+        submission_id = "c" * 32
+        app.write_json_atomic(app.SUBMISSIONS_FILE, [{"submission_id": submission_id, "status": "pending_review", "creator_id": "creator"}])
+        server = app.ResilientThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
+        cookie = f"{app.ADMIN_COOKIE}={app.ADMIN_PASSWORD}"
+        try:
+            with patch.object(app.Handler, "log_message"):
+                connection.request("POST", "/api/admin/submissions/review", body=json.dumps({"submission_id": submission_id, "status": "approved"}), headers={"Content-Type": "application/json"})
+                response = connection.getresponse()
+                response.read()
+                self.assertEqual(response.status, 401)
+                connection.request("POST", "/api/admin/submissions/review", body=json.dumps({"submission_id": submission_id, "status": "rejected"}), headers={"Content-Type": "application/json", "Cookie": cookie})
+                response = connection.getresponse()
+                response.read()
+                self.assertEqual(response.status, 400)
+                connection.request("POST", "/api/admin/submissions/review", body=json.dumps({"submission_id": submission_id, "status": "rejected", "reason": "Não segue o roteiro"}), headers={"Content-Type": "application/json", "Cookie": cookie})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.loads(response.read())["submission"]["review_reason"], "Não segue o roteiro")
+                connection.request("GET", "/api/admin/submissions?status=pending_review", headers={"Cookie": cookie})
+                response = connection.getresponse()
+                self.assertEqual(json.loads(response.read())["total"], 0)
+                connection.request("GET", "/api/admin/submissions?status=rejected", headers={"Cookie": cookie})
+                response = connection.getresponse()
+                self.assertEqual(json.loads(response.read())["submissions"][0]["submission_id"], submission_id)
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_creator_script_does_not_render_reference_link(self) -> None:
         html = app.page_html()
         self.assertIn('const brief=d.main?mainContentCard(d.main):""', html)
