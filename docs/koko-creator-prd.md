@@ -1,5 +1,7 @@
 # Koko Creator PRD
 
+> Historical design proposal (2026-06-03). For the current implementation, start with the repository `README.md` and `AGENTS.md`. The feature-completeness statements below are no longer authoritative.
+
 版本：v0.1  
 日期：2026-06-03  
 产品定位：面向巴西短视频创作者的脚本推荐与拍摄回传平台
