@@ -3396,6 +3396,7 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
     raw_script_opens = 0
     active_account_ids: set[int] = set()
     unique_script_ids: set[str] = set()
+    dashboard_users: dict[int, dict[str, Any]] = {}
     daily_people: dict[str, dict[int, dict[str, str]]] = {}
     weekly_people: dict[str, set[int]] = {}
     daily_script_opens: dict[str, int] = {}
@@ -3404,6 +3405,29 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
     for event in events:
         event_name = str(event.get("event") or "")
         account = find_account_from_lookup(str(event.get("account_id") or ""), alias_lookup)
+        if account and id(account) not in test_accounts and event_name and event_name != "page_duration":
+            attribution = account.get("attribution") if isinstance(account.get("attribution"), dict) else {}
+            first = attribution.get("first") if isinstance(attribution.get("first"), dict) else {}
+            user = dashboard_users.setdefault(id(account), {
+                "account_id": str(account.get("account_id") or ""),
+                "phone": str(account.get("phone") or ""),
+                "kwai_id": str(account.get("kwai_id") or ""),
+                "uid": str(account.get("uid") or ""),
+                "display_name": str(account.get("display_name") or account.get("account_id") or ""),
+                "source": str(first.get("source") or account.get("source") or ""),
+                "registration_status": str(account.get("registration_status") or "unregistered"),
+                "platform_open_count": 0,
+                "script_share_open_count": 0,
+                "has_activity": True,
+                "_script_views": {},
+            })
+            if event_name == "site_open":
+                user["platform_open_count"] += 1
+            script_id = str(event.get("script_id") or "").strip()
+            if event_name in {"script_open", "detail_open"} and script_id:
+                user["script_share_open_count"] += 1
+                view = user["_script_views"].setdefault(script_id, {"script_id": script_id, "views": 0})
+                view["views"] += 1
         if account and id(account) not in test_accounts and event_name and event_name != "page_duration":
             created = parse_iso_time(event.get("created_at"))
             if created:
@@ -3494,6 +3518,11 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
             "unique_scripts_opened": len(unique_script_ids),
             "submissions": submission_count,
         },
+        "users": [
+            {**{key: value for key, value in user.items() if key != "_script_views"},
+             "script_views": list(user["_script_views"].values())}
+            for user in dashboard_users.values()
+        ],
         "daily_usage": [
             {
                 "day": day,
