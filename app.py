@@ -3388,7 +3388,11 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
     alias_lookup = account_alias_lookup(accounts)
     account_alias_sets = {id(account): account_aliases(account) for account in accounts}
     test_accounts = {id(account) for account in accounts if "666" in account_alias_sets[id(account)]}
-    events = [event for event in load_analytics_events() if event_in_days(event, days)]
+    all_events = load_analytics_events()
+    events = [event for event in all_events if event_in_days(event, days)]
+    history_start = min((str(event.get("created_at") or "") for event in all_events if event.get("created_at")), default="")
+    historical_script_ids = sorted({str(event.get("script_id") or "").strip() for event in all_events
+                                    if event.get("event") in {"script_open", "detail_open"} and event.get("script_id")})
     submissions_raw = read_json_file(SUBMISSIONS_FILE, [])
     submissions = [item for item in (submissions_raw if isinstance(submissions_raw, list) else []) if isinstance(item, dict)]
 
@@ -3405,7 +3409,7 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
     for event in events:
         event_name = str(event.get("event") or "")
         account = find_account_from_lookup(str(event.get("account_id") or ""), alias_lookup)
-        if account and id(account) not in test_accounts and event_name and event_name != "page_duration":
+        if account and id(account) not in test_accounts and event_name:
             attribution = account.get("attribution") if isinstance(account.get("attribution"), dict) else {}
             first = attribution.get("first") if isinstance(attribution.get("first"), dict) else {}
             user = dashboard_users.setdefault(id(account), {
@@ -3418,12 +3422,24 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
                 "registration_status": str(account.get("registration_status") or "unregistered"),
                 "platform_open_count": 0,
                 "script_share_open_count": 0,
-                "has_activity": True,
+                "has_activity": False,
+                "platform_duration_seconds": 0,
+                "script_duration_seconds": 0,
+                "click_counts": {},
                 "_script_views": {},
             })
+            if event_name != "page_duration":
+                user["has_activity"] = True
             if event_name == "site_open":
                 user["platform_open_count"] += 1
             script_id = str(event.get("script_id") or "").strip()
+            if event_name == "page_duration":
+                duration = max(0, int(event.get("duration_ms") or 0)) / 1000
+                key = "script_duration_seconds" if script_id or event.get("page_type") == "script" else "platform_duration_seconds"
+                user[key] += duration
+            if event_name in CLICK_EVENT_LABELS:
+                label = CLICK_EVENT_LABELS[event_name]
+                user["click_counts"][label] = user["click_counts"].get(label, 0) + 1
             if event_name in {"script_open", "detail_open"} and script_id:
                 user["script_share_open_count"] += 1
                 view = user["_script_views"].setdefault(script_id, {"script_id": script_id, "views": 0})
@@ -3523,6 +3539,8 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
              "script_views": list(user["_script_views"].values())}
             for user in dashboard_users.values()
         ],
+        "historical_script_opened_ids": historical_script_ids,
+        "history_start": history_start,
         "daily_usage": [
             {
                 "day": day,
