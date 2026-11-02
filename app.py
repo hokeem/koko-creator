@@ -3381,7 +3381,7 @@ def script_title_for_id(entry_id: str) -> str:
     return str(entry.get("title") or "") if entry else ""
 
 
-def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
+def creator_analytics_summary_payload(days: int = 180, *, beijing_calendar: bool = False) -> dict[str, Any]:
     """Return compact dashboard counters and daily account usage aggregates."""
     days = max(1, min(180, int(days or 180)))
     accounts = [item for item in load_accounts() if isinstance(item, dict)]
@@ -3389,7 +3389,13 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
     account_alias_sets = {id(account): account_aliases(account) for account in accounts}
     test_accounts = {id(account) for account in accounts if "666" in account_alias_sets[id(account)]}
     all_events = load_analytics_events()
-    events = [event for event in all_events if event_in_days(event, days)]
+    if beijing_calendar:
+        today_bj = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).date()
+        first_day = today_bj - timedelta(days=days - 1)
+        events = [event for event in all_events if (created := parse_iso_time(event.get("created_at")))
+                  and first_day <= created.astimezone(ZoneInfo("Asia/Shanghai")).date() <= today_bj]
+    else:
+        events = [event for event in all_events if event_in_days(event, days)]
     history_start = min((str(event.get("created_at") or "") for event in all_events if event.get("created_at")), default="")
     historical_script_ids = sorted({str(event.get("script_id") or "").strip() for event in all_events
                                     if event.get("event") in {"script_open", "detail_open"} and event.get("script_id")})
@@ -3522,6 +3528,7 @@ def creator_analytics_summary_payload(days: int = 180) -> dict[str, Any]:
     return {
         "ok": True,
         "days": days,
+        "period_mode": "beijing_calendar" if beijing_calendar else "rolling",
         "generated_at": now_iso(),
         "summary": {
             "registered_users": registered_users,
@@ -5692,7 +5699,7 @@ class Handler(BaseHTTPRequestHandler):
                 days = max(1, min(180, int((q.get("days") or ["180"])[0] or "180")))
             except Exception:
                 days = 180
-            self.send_json(creator_analytics_summary_payload(days))
+            self.send_json(creator_analytics_summary_payload(days, beijing_calendar=(q.get("calendar") or [""])[0] == "beijing"))
             return
         if parsed.path == "/api/admin/campaign-dashboard":
             if not self.require_admin():

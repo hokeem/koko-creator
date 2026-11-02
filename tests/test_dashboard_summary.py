@@ -1,10 +1,28 @@
 import unittest
 from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import app
 
 
 class DashboardSummaryTests(unittest.TestCase):
+    def test_beijing_calendar_uses_complete_calendar_days(self):
+        now = datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Shanghai'))
+        start = (now - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+        account = {'account_id': 'creator-a'}
+        events = [
+            {'event': 'script_open', 'account_id': 'creator-a', 'script_id': 'inside', 'created_at': start.isoformat()},
+            {'event': 'script_open', 'account_id': 'creator-a', 'script_id': 'outside', 'created_at': (start - timedelta(seconds=1)).isoformat()},
+        ]
+        with (patch.object(app, 'load_accounts', return_value=[account]),
+              patch.object(app, 'load_analytics_events', return_value=events),
+              patch.object(app, 'read_json_file', return_value=[]),
+              patch.object(app, 'load_creator_profiles', return_value=[])):
+            result = app.creator_analytics_summary_payload(7, beijing_calendar=True)
+        self.assertEqual(result['summary']['script_opens'], 1)
+        self.assertEqual(result['users'][0]['script_views'][0]['script_id'], 'inside')
+
     def test_all_script_views_and_attribution_are_included(self):
         account = {"account_id": "creator-a", "registration_status": "registered",
                    "attribution": {"first": {"source": "inbox"}}}
