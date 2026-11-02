@@ -2065,6 +2065,52 @@ def review_submission(submission_id: str, status: str, reason: str = "") -> dict
     raise ValueError("Submission not found.")
 
 
+def import_independent_submissions(items: list[dict[str, Any]]) -> dict[str, Any]:
+    if not isinstance(items, list) or not items or len(items) > 500:
+        raise ValueError("Provide between 1 and 500 submissions.")
+    accounts = [a for a in load_accounts() if isinstance(a, dict) and
+                (a.get("registration_status") == "registered" or a.get("registered_at"))]
+    prepared = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("Each submission must be an object.")
+        key = canonical_account_key(str(item.get("account_id") or item.get("kwai_id") or ""))
+        matches = [a for a in accounts if key and key in account_aliases(a)]
+        if len(matches) != 1:
+            raise ValueError("Registered creator not found or identifier is ambiguous.")
+        if not str(matches[0].get("account_id") or "").strip():
+            raise ValueError("Registered creator has no account id.")
+        url = str(item.get("video_url") or "").strip()
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("Invalid public video URL.")
+        submitted_at = str(item.get("created_at") or now_iso()).strip()
+        if not parse_iso_time(submitted_at):
+            raise ValueError("Invalid submission timestamp.")
+        prepared.append((matches[0], url, submitted_at))
+    created, duplicates = [], []
+    with creator_data_transaction():
+        submissions = read_record_list(SUBMISSIONS_FILE)
+        for account, url, submitted_at in prepared:
+            account_id = str(account.get("account_id") or "")
+            normalized = normalize_submission_video_url(url)
+            existing = next((s for s in submissions if isinstance(s, dict) and
+                             normalize_submission_video_url(s.get("video_url") or "") == normalized), None)
+            if existing:
+                duplicates.append({"video_url": url, "submission_id": existing.get("submission_id"),
+                                   "same_creator": submission_matches_account(existing, account)})
+                continue
+            submission = {"submission_id": uuid4().hex, "entry_id": "", "script_title": "自主回传",
+                          "submitted_title": "Vídeo independente", "submission_type": "independent",
+                          "creator_id": account_id, "detected_kwai_id": str(account.get("kwai_id") or ""),
+                          "video_url": url, "status": "pending_review", "created_at": submitted_at}
+            submissions.insert(0, submission)
+            created.append(submission)
+        if created:
+            write_json_atomic(SUBMISSIONS_FILE, submissions, durable=True)
+    return {"ok": True, "created": created, "duplicates": duplicates}
+
+
 def import_admin_submission(payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Idempotently import a trusted creator return into dashboard analytics."""
     with creator_data_transaction():
@@ -5154,7 +5200,7 @@ function missionCandidates(){{return preferenceFirstCandidates()}}
 function missionPickedEntries(day){{return missionState(day).picks.map(entry).filter(Boolean)}}
 function missionWeekKeys(){{const today=new Date(`${{missionDayKey()}}T00:00:00`);const start=new Date(today);start.setDate(today.getDate()-today.getDay());const keys=[];for(let i=0;i<7;i++){{const d=new Date(start);d.setDate(start.getDate()+i);keys.push(dayKey(d))}}return keys}}
 function submissionDayKey(s){{const raw=String(s?.created_at||"");const d=raw?new Date(raw):null;if(d&&!Number.isNaN(d.getTime())){{return `${{d.getFullYear()}}-${{String(d.getMonth()+1).padStart(2,"0")}}-${{String(d.getDate()).padStart(2,"0")}}`}}return missionDayKey()}}
-function missionWeeklyDone(){{const week=new Set(missionWeekKeys());const seen=new Set();(submissions||[]).forEach(s=>{{if(!s||typeof s!=="object"||s.status!=="approved")return;const id=String(s.entry_id||s.script_id||s.video_url||"");if(id&&week.has(submissionDayKey(s)))seen.add(id)}});return seen.size}}
+function missionWeeklyDone(){{const week=new Set(missionWeekKeys());const seen=new Set();(submissions||[]).forEach(s=>{{if(!s||typeof s!=="object"||s.status!=="approved"||s.submission_type==="independent")return;const id=String(s.entry_id||s.script_id||s.video_url||"");if(id&&week.has(submissionDayKey(s)))seen.add(id)}});return seen.size}}
 function missionStatusText(id){{const sub=submissionFor(id);if(sub)return submissionReviewText(sub);if(missionState().picks.includes(id))return lang==="zh"?"已加入今日任务":"Na missão de hoje";return lang==="zh"?"点击加入今日任务":"Toque para escolher"}}
 function missionCard(e,selected,mode){{const done=missionDone(e.entry_id);return `<article class="mission-task ${{selected?"selected":""}} ${{done?"done":""}}"><img src="${{esc(scriptImage(e))}}" loading="lazy" alt=""><div><h3>${{esc(ptTitle(e))}}</h3><small>${{esc(missionStatusText(e.entry_id))}}</small><div class="mission-actions"><button class="${{selected?"":"solid"}}" type="button" data-mission-pick="${{esc(e.entry_id)}}">${{selected?(lang==="zh"?"移出":"Remover"):(lang==="zh"?"选择":"Escolher")}}</button><button type="button" data-detail="${{esc(e.entry_id)}}">${{lang==="zh"?"查看":"Ver"}}</button></div></div></article>`}}
 function questSummary(e){{return preferPortugueseText(e.summary)||preferPortugueseText(e.title)||""}}
@@ -5208,13 +5254,13 @@ document.addEventListener("click",event=>{{const retry=event.target.closest("[da
 async function renderAllScripts(){{document.querySelector("#all-title").textContent=lang==="zh"?"全部推荐脚本":"Todos os roteiros";const root=document.querySelector("#all-feed");if(!entries.length)root.innerHTML=`<section class="state card"><h3>Loading...</h3></section>`;try{{await ensure(48);renderAllScriptsFeed()}}catch(e){{root.innerHTML=`<section class="state card"><h3>Erro</h3></section>`}}}}
 async function loadSubmissions(){{try{{const r=await fetch(`/api/creator/submissions?_=${{Date.now()}}`);const d=await r.json();submissions=Array.isArray(d.submissions)?d.submissions.filter(s=>s&&typeof s==="object"):[]}}catch(e){{submissions=[]}}return submissions}}
 function submissionTime(s){{const raw=String(s.created_at||"");const d=new Date(raw);if(Number.isNaN(d.getTime()))return raw;return lang==="zh"?`回传时间：${{d.toLocaleString("zh-CN",{{hour12:false}})}}`:`Enviado em ${{d.toLocaleString("pt-BR",{{hour12:false}})}}`}}
-function submissionReviewText(s){{if(s.status==="approved")return lang==="zh"?"审核通过，已计入奖励":"Aprovado. Conta para o bônus.";if(s.status==="rejected")return (lang==="zh"?"审核失败：":"Reprovado: ")+String(s.review_reason|| (lang==="zh"?"未填写原因":"Motivo não informado"));return lang==="zh"?"已提交，等待审核（暂不计奖）":"Enviado. Aguardando análise (ainda não conta para o bônus)."}}
+function submissionReviewText(s){{if(s.submission_type==="independent"&&s.status==="approved")return lang==="zh"?"审核通过，自主回传不计入脚本奖励":"Aprovado. Vídeo independente não conta para o bônus de roteiro.";if(s.status==="approved")return lang==="zh"?"审核通过，已计入奖励":"Aprovado. Conta para o bônus.";if(s.status==="rejected")return (lang==="zh"?"审核失败：":"Reprovado: ")+String(s.review_reason|| (lang==="zh"?"未填写原因":"Motivo não informado"));return lang==="zh"?"已提交，等待审核（暂不计奖）":"Enviado. Aguardando análise (ainda não conta para o bônus)."}}
 function creatorWalletEstimate(){{
   const now=new Date();
   const monthKey=`${{now.getFullYear()}}-${{String(now.getMonth()+1).padStart(2,"0")}}`;
   const all=(submissions||[]).filter(s=>s&&typeof s==="object");
   const pending=all.filter(s=>String(s.status||"pending_review")==="pending_review"&&submissionDayKey(s).startsWith(monthKey)).length;
-  const ordered=all.filter(s=>s.status==="approved").sort((a,b)=>String(a.created_at||"").localeCompare(String(b.created_at||"")));
+  const ordered=all.filter(s=>s.status==="approved"&&s.submission_type!=="independent").sort((a,b)=>String(a.created_at||"").localeCompare(String(b.created_at||"")));
   const dailyCounts=new Map(),weeklyCounts=new Map();
   let daily=0,weekly=0,approvedThisMonth=0;
   for(const s of ordered){{
@@ -6072,6 +6118,15 @@ class Handler(BaseHTTPRequestHandler):
                 limit = max(1, min(1000, int(payload.get("limit") or 200)))
                 self.send_json(backfill_submission_creators(limit), status=200)
             except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+            return
+        if parsed.path == "/api/admin/submissions/independent":
+            if not self.require_admin():
+                return
+            try:
+                payload = self.read_body()
+                self.send_json(import_independent_submissions(payload.get("submissions")), status=200)
+            except (ValueError, TypeError) as exc:
                 self.send_json({"error": str(exc)}, status=400)
             return
         if parsed.path == "/api/admin/submissions/import":

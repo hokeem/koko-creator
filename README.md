@@ -1,5 +1,9 @@
 # Koko Creator / kokocomedy.com
 
+## Independent video returns
+
+Administrators can import videos without a matching script using `POST /api/admin/submissions/independent` with existing admin authentication. JSON example: `{"submissions":[{"account_id":"CREATOR_ACCOUNT_ID","video_url":"https://example.com/video","created_at":"2026-11-03T10:00:00+08:00"}]}`. `kwai_id` can replace `account_id`; `created_at` is optional. The batch is validated before writing; only uniquely matched registered accounts are accepted. The response lists created records and duplicate URLs, including whether the creator matches. Maximum 500 records per batch. Returns have no script, start pending review, and do not count toward script rewards. Do not use production records as smoke tests.
+
 This repository serves the public, Portuguese-language creator experience for Brazilian Kwai creators. It is separate from the internal [Koko content center](https://github.com/hokeem/koko-kwai-coach). The two services have separate code, Render deployments, and persistent data disks.
 
 ## Current product flow
