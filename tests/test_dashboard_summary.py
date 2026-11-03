@@ -7,6 +7,31 @@ import app
 
 
 class DashboardSummaryTests(unittest.TestCase):
+    def test_all_time_includes_events_older_than_rolling_window(self):
+        old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
+        account = {"account_id": "creator-a", "registration_status": "registered"}
+        events = [{"event": "script_open", "account_id": "creator-a", "script_id": "old", "created_at": old}]
+        with (patch.object(app, "load_accounts", return_value=[account]),
+              patch.object(app, "load_analytics_events", return_value=events),
+              patch.object(app, "read_json_file", return_value=[]),
+              patch.object(app, "load_creator_profiles", return_value=[])):
+            rolling = app.creator_analytics_summary_payload(7, beijing_calendar=True)
+            all_time = app.creator_analytics_summary_payload(7, all_time=True)
+        self.assertEqual(rolling["summary"]["script_opens"], 0)
+        self.assertEqual(all_time["summary"]["script_opens"], 1)
+        self.assertEqual(all_time["period_mode"], "all")
+
+    def test_campaign_all_time_includes_old_visits(self):
+        old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
+        event = {"event": "campaign_visit", "created_at": old, "visitor_id": "visitor-1", "user_agent": "Mozilla/5.0", "meta": {"source": "inbox", "campaign": "default"}}
+        with (patch.object(app, "load_accounts", return_value=[]),
+              patch.object(app, "load_analytics_events", return_value=[event]),
+              patch.object(app, "read_json_file", return_value=[])):
+            rolling = app.creator_campaign_dashboard_payload(7)
+            all_time = app.creator_campaign_dashboard_payload(7, all_time=True)
+        self.assertEqual(sum(row["visits"] for row in rolling["rows"]), 0)
+        self.assertEqual(sum(row["visits"] for row in all_time["rows"]), 1)
+
     def test_beijing_calendar_uses_complete_calendar_days(self):
         now = datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Shanghai'))
         start = (now - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)

@@ -3427,7 +3427,7 @@ def script_title_for_id(entry_id: str) -> str:
     return str(entry.get("title") or "") if entry else ""
 
 
-def creator_analytics_summary_payload(days: int = 180, *, beijing_calendar: bool = False) -> dict[str, Any]:
+def creator_analytics_summary_payload(days: int = 180, *, beijing_calendar: bool = False, all_time: bool = False) -> dict[str, Any]:
     """Return compact dashboard counters and daily account usage aggregates."""
     days = max(1, min(180, int(days or 180)))
     accounts = [item for item in load_accounts() if isinstance(item, dict)]
@@ -3435,7 +3435,9 @@ def creator_analytics_summary_payload(days: int = 180, *, beijing_calendar: bool
     account_alias_sets = {id(account): account_aliases(account) for account in accounts}
     test_accounts = {id(account) for account in accounts if "666" in account_alias_sets[id(account)]}
     all_events = load_analytics_events()
-    if beijing_calendar:
+    if all_time:
+        events = all_events
+    elif beijing_calendar:
         today_bj = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).date()
         first_day = today_bj - timedelta(days=days - 1)
         events = [event for event in all_events if (created := parse_iso_time(event.get("created_at")))
@@ -3574,7 +3576,7 @@ def creator_analytics_summary_payload(days: int = 180, *, beijing_calendar: bool
     return {
         "ok": True,
         "days": days,
-        "period_mode": "beijing_calendar" if beijing_calendar else "rolling",
+        "period_mode": "all" if all_time else ("beijing_calendar" if beijing_calendar else "rolling"),
         "generated_at": now_iso(),
         "summary": {
             "registered_users": registered_users,
@@ -3611,7 +3613,7 @@ def creator_analytics_summary_payload(days: int = 180, *, beijing_calendar: bool
     }
 
 
-def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "", since: str = "") -> dict[str, Any]:
+def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "", since: str = "", all_time: bool = False) -> dict[str, Any]:
     days = max(1, min(90, int(days or 30)))
     if month and not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", month):
         raise ValueError("Invalid campaign month")
@@ -3628,7 +3630,7 @@ def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "", since
             return False
         if month:
             return created.astimezone(brazil_tz).strftime("%Y-%m") == month
-        return created >= datetime.now(timezone.utc) - timedelta(days=days)
+        return all_time or created >= datetime.now(timezone.utc) - timedelta(days=days)
 
     accounts = [item for item in load_accounts() if isinstance(item, dict)]
     alias_lookup = account_alias_lookup(accounts)
@@ -3767,13 +3769,13 @@ def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "", since
                         ("visits", "unique_visitors", "new_creators", "script_opens", "submissions")}}
 
 
-def cached_creator_campaign_dashboard_payload(days: int = 30, *, month: str = "", since: str = "") -> dict[str, Any]:
-    key = (days, month, since)
+def cached_creator_campaign_dashboard_payload(days: int = 30, *, month: str = "", since: str = "", all_time: bool = False) -> dict[str, Any]:
+    key = (days, month, since, all_time)
     with CAMPAIGN_DASHBOARD_LOCK:
         cached = CAMPAIGN_DASHBOARD_CACHE.get(key)
         if cached and time.monotonic() - cached[0] < 30:
             return cached[1]
-        payload = creator_campaign_dashboard_payload(days, month=month, since=since)
+        payload = creator_campaign_dashboard_payload(days, month=month, since=since, all_time=all_time)
         CAMPAIGN_DASHBOARD_CACHE[key] = (time.monotonic(), payload)
         return payload
 
@@ -5745,7 +5747,7 @@ class Handler(BaseHTTPRequestHandler):
                 days = max(1, min(180, int((q.get("days") or ["180"])[0] or "180")))
             except Exception:
                 days = 180
-            self.send_json(creator_analytics_summary_payload(days, beijing_calendar=(q.get("calendar") or [""])[0] == "beijing"))
+            self.send_json(creator_analytics_summary_payload(days, beijing_calendar=(q.get("calendar") or [""])[0] == "beijing", all_time=(q.get("all") or [""])[0] == "1"))
             return
         if parsed.path == "/api/admin/campaign-dashboard":
             if not self.require_admin():
@@ -5758,7 +5760,7 @@ class Handler(BaseHTTPRequestHandler):
             month = (query.get("month") or [""])[0]
             since = (query.get("since") or [""])[0]
             try:
-                payload = cached_creator_campaign_dashboard_payload(days, month=month, since=since)
+                payload = cached_creator_campaign_dashboard_payload(days, month=month, since=since, all_time=(query.get("all") or [""])[0] == "1")
             except ValueError:
                 self.send_json({"error": "Invalid campaign period"}, status=400)
                 return

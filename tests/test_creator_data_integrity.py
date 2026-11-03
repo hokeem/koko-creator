@@ -107,7 +107,7 @@ class CreatorDataIntegrityTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=8) as pool:
                 results = list(pool.map(lambda _: app.cached_creator_campaign_dashboard_payload(month="2026-10"), range(8)))
         self.assertEqual(results, [{"ok": True}] * 8)
-        build.assert_called_once_with(30, month="2026-10", since="")
+        build.assert_called_once_with(30, month="2026-10", since="", all_time=False)
 
     def test_campaign_link_redirect_and_dashboard(self) -> None:
         server = app.ResilientThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
