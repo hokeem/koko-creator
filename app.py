@@ -5713,6 +5713,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": "Invalid review status."}, status=400)
                     return
                 submissions = [item for item in submissions if isinstance(item, dict) and str(item.get("status") or "pending_review") == review_status]
+            if (q.get("exclude_independent") or [""])[0] == "1":
+                submissions = [item for item in submissions if isinstance(item, dict) and item.get("submission_type") != "independent"]
             total = len(submissions)
             page = submissions[offset:offset + limit]
             enriched = enrich_submission_records(page)
