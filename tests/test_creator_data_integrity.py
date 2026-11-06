@@ -310,6 +310,32 @@ class CreatorDataIntegrityTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+    def test_review_api_sorts_newest_before_pagination(self) -> None:
+        app.write_json_atomic(app.SUBMISSIONS_FILE, [
+            {"submission_id": "old", "status": "pending_review", "created_at": "2026-10-01T00:00:00+00:00"},
+            {"submission_id": "new", "status": "pending_review", "created_at": "2026-11-05T08:00:00+08:00"},
+            {"submission_id": "middle", "status": "pending_review", "created_at": "2026-11-01T00:00:00+00:00"},
+            {"submission_id": "independent", "status": "pending_review", "submission_type": "independent", "created_at": "2026-11-06T00:00:00+00:00"},
+        ])
+        server = app.ResilientThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
+        try:
+            with patch.object(app.Handler, "log_message"):
+                for offset, expected in enumerate(("new", "middle", "old")):
+                    connection.request("GET", f"/api/admin/submissions?status=pending_review&exclude_independent=1&limit=1&offset={offset}", headers={"Cookie": f"{app.ADMIN_COOKIE}={app.ADMIN_PASSWORD}"})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    payload = json.loads(response.read())
+                    self.assertEqual(payload["total"], 3)
+                    self.assertEqual(payload["submissions"][0]["submission_id"], expected)
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_creator_script_does_not_render_reference_link(self) -> None:
         html = app.page_html()
         self.assertIn('const brief=d.main?mainContentCard(d.main):""', html)

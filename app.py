@@ -5715,6 +5715,14 @@ class Handler(BaseHTTPRequestHandler):
                 submissions = [item for item in submissions if isinstance(item, dict) and str(item.get("status") or "pending_review") == review_status]
             if (q.get("exclude_independent") or [""])[0] == "1":
                 submissions = [item for item in submissions if isinstance(item, dict) and item.get("submission_type") != "independent"]
+            submissions = [item for item in submissions if isinstance(item, dict)]
+            submissions.sort(
+                key=lambda item: (
+                    (parse_iso_time(item.get("created_at")) or datetime(1970, 1, 1, tzinfo=timezone.utc)).timestamp(),
+                    str(item.get("submission_id") or ""),
+                ),
+                reverse=True,
+            )
             total = len(submissions)
             page = submissions[offset:offset + limit]
             enriched = enrich_submission_records(page)
