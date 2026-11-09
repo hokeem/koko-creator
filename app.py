@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from reference_media import prepare_reference, reference_path, serve_reference
 import fcntl
 import gzip
 import hashlib
@@ -1789,6 +1790,13 @@ def video_playback(entry: dict[str, Any]) -> dict[str, Any]:
     source_page = str(entry.get("video_url") or "").strip()
     platform, embed_url = official_video_embed_url(source_page)
     direct_source = video_source_url(entry) if platform == "kwai" else ""
+    if platform == "tiktok":
+        if prepare_reference(DATA_ROOT, str(entry.get('entry_id') or ''), source_page):
+            direct_source = '/api/creator/reference-media/' + str(entry['entry_id'])
+        else:
+            return {'reference_video_enabled': True, 'video_url': source_page,
+                    'error_code': 'reference_video_unavailable',
+                    'error': 'Não foi possível carregar o vídeo original. Tente novamente.'}
     return {
         "platform": platform,
         "playback_type": "direct_mp4" if direct_source else ("official_embed" if embed_url else "external_link"),
@@ -5551,7 +5559,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path in {"/", "/creator-portal"}:
             visitor_id = record_site_open(self.headers, self.path, account=current_account(self.headers), source="document")
-            self.send_html(page_html(), headers=[visitor_cookie_header(visitor_id), ("Cache-Control", "no-store")])
+            self.send_html(page_html().replace('</body>', '<script src="/static/reference-playback.js?v=20261109"></script></body>'), headers=[visitor_cookie_header(visitor_id), ("Cache-Control", "no-store")])
             return
         if parsed.path in {"/creator-survey", "/creator-intake"}:
             self.send_html(survey_html())
@@ -5650,7 +5658,7 @@ class Handler(BaseHTTPRequestHandler):
             script_match = re.fullmatch(r"/script/([0-9a-f]{32})", parsed.path)
             script_id = script_match.group(1) if script_match else ""
             visitor_id = record_site_open(self.headers, self.path, account=current_account(self.headers), script_id=script_id, source="script_link")
-            self.send_html(page_html(), headers=[visitor_cookie_header(visitor_id), ("Cache-Control", "no-store")])
+            self.send_html(page_html().replace('</body>', '<script src="/static/reference-playback.js?v=20261109"></script></body>'), headers=[visitor_cookie_header(visitor_id), ("Cache-Control", "no-store")])
             return
         if parsed.path.startswith("/api/creator/scripts/"):
             entry_id = parsed.path.rsplit("/", 1)[-1]
@@ -5683,6 +5691,15 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception as exc:
                 self.send_json({"entry_id": entry_id, "script_html": "", "complete": False, "error": str(exc)}, status=503)
+            return
+        media_match = re.fullmatch(r'/api/creator/reference-media/([0-9a-f]{32})', parsed.path)
+        if media_match:
+            entry = entry_by_id(media_match.group(1))
+            path = reference_path(DATA_ROOT, media_match.group(1))
+            if not entry or entry.get('reference_video_enabled') is False or not path.is_file():
+                self.send_error(404)
+                return
+            serve_reference(self, path)
             return
         if parsed.path.startswith("/api/creator/video-source/"):
             entry_id = parsed.path.rsplit("/", 1)[-1]
