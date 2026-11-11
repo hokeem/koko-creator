@@ -12,33 +12,6 @@
       "4582066d304ffa39062159448bce4859",
     ],
   };
-  let firstPreferenceFlow = false;
-
-  const originalLoadAccountState = loadAccountState;
-  loadAccountState = async function (...args) {
-    const result = await originalLoadAccountState(...args);
-    if (creatorUser && result) {
-      if (!preferencesCompleted && workspace.intro_preferences !== false) {
-        workspace.intro_preferences = true;
-      }
-      firstPreferenceFlow = workspace.intro_preferences === true;
-    }
-    return result;
-  };
-
-  const originalOptionsFor = optionsFor;
-  optionsFor = function (question) {
-    if (!firstPreferenceFlow) return originalOptionsFor(question);
-    if (question.id !== "people") return [];
-    return originalOptionsFor(question).filter(option => ["couple", "friends"].includes(option.id));
-  };
-
-  const originalFinishProfile = finishProfile;
-  finishProfile = function (...args) {
-    if (firstPreferenceFlow) workspace.intro_preferences = true;
-    return originalFinishProfile(...args);
-  };
-
   const originalPreferenceFirstCandidates = preferenceFirstCandidates;
   preferenceFirstCandidates = function (limit = Infinity) {
     const candidates = originalPreferenceFirstCandidates(Infinity);
@@ -50,18 +23,11 @@
     return [...pinned, ...candidates.filter(entry => !seen.has(entry.entry_id))].slice(0, limit);
   };
 
-  document.addEventListener("click", event => {
-    if (!event.target.closest("[data-reselect]")) return;
-    firstPreferenceFlow = false;
-    workspace.intro_preferences = false;
-    saveWorkspace();
-  }, true);
-
-  if (sessionStorage.getItem("koko_intro_reco_cache_version") !== "1") {
+  if (sessionStorage.getItem("koko_intro_reco_cache_version") !== "2") {
     for (let index = sessionStorage.length - 1; index >= 0; index--) {
       const key = sessionStorage.key(index);
       if (key && key.startsWith("koko_reco_cache_v4_paged_")) sessionStorage.removeItem(key);
     }
-    sessionStorage.setItem("koko_intro_reco_cache_version", "1");
+    sessionStorage.setItem("koko_intro_reco_cache_version", "2");
   }
 })();

@@ -17,16 +17,18 @@ class IntroRecommendationsTests(unittest.TestCase):
         ]
         entries.append({"entry_id": "newer", "content_type": "朋友整蛊", "created_at": "2026-12-01"})
         self.assertEqual(
-            [entry["entry_id"] for entry in app.recommendation_sequence(entries, ["friends"])[:3]],
+            [entry["entry_id"] for entry in app.recommendation_sequence(entries, ["friends", "dur_1_20"])[:3]],
             ids["friends"],
         )
         self.assertEqual(
-            [entry["entry_id"] for entry in app.recommendation_sequence(entries, ["couple"])[:4]],
+            [entry["entry_id"] for entry in app.recommendation_sequence(entries, ["couple", "couple_flirt", "dur_20_60"])[:4]],
             ids["couple"],
         )
 
     def test_page_loads_intro_ui(self) -> None:
-        self.assertIn("/static/intro-recommendations.js?v=1", app.page_html())
+        self.assertIn("/static/intro-recommendations.js?v=2", app.page_html())
+        self.assertEqual(len(app.QUESTIONS), 3)
+        self.assertEqual([option["id"] for option in app.QUESTIONS[0]["options"]], ["couple", "family", "friends"])
 
 
 if __name__ == "__main__":
