@@ -1326,6 +1326,19 @@ DURATION_LABELS = {
 COUPLE_TYPES = {"夫妻整蛊/冲突", "夫妻暧昧"}
 FAMILY_TYPES = {"家庭整蛊"}
 FRIEND_TYPES = {"朋友整蛊"}
+INTRO_SCRIPT_IDS = {
+    "friends": [
+        "777fe577d4fb324a679a0b45dea857a5",
+        "ec0ec7df47c84ffca94093a9064d6c26",
+        "ce3d6c56758d42128513558f7658dac8",
+    ],
+    "couple": [
+        "dcfaaf6d1374a308bd140bb510675f07",
+        "626de48b62a88e155ec86f7cb5b26d0f",
+        "6ab786cb3ed845a3a0ae476e042913e2",
+        "4582066d304ffa39062159448bce4859",
+    ],
+}
 MONEY_TYPES = set()
 SNEAKY_TYPES = set()
 PRANK_TYPES = {"夫妻整蛊/冲突", "家庭整蛊", "朋友整蛊"}
@@ -1473,6 +1486,13 @@ def recommendation_sequence(entries: list[dict[str, Any]], selected: list[str]) 
                 seen.add(entry_id)
                 picked.append(entry)
 
+    intro_type = "friends" if "friends" in selected else "couple" if "couple" in selected else ""
+    if intro_type:
+        by_id = {str(entry.get("entry_id") or ""): entry for entry in ordered_entries}
+        for entry_id in INTRO_SCRIPT_IDS[intro_type]:
+            if entry_id in by_id:
+                picked.append(by_id[entry_id])
+                seen.add(entry_id)
     add([entry for entry in ordered_entries if entry_matches_hard_selection(entry, selected)])
     add([entry for entry in ordered_entries if entry_matches_topic_selection(entry, selected)])
     add([entry for entry in ordered_entries if entry_matches_relaxed_selection(entry, selected)])
@@ -5420,7 +5440,7 @@ document.querySelector("#auth-form").addEventListener("submit",handleAuthSubmit)
 document.querySelector("#profile-avatar-input")?.addEventListener("change",e=>handleProfileImage("avatar",e.target.files?.[0]));
 document.querySelector("#profile-cover-input")?.addEventListener("change",e=>handleProfileImage("cover",e.target.files?.[0]));
 async function bootstrap(){{if(creatorUser){{await loadAccountState();resetRepeatableTestFlow()}}applyLang();setAuthMode("login");show(isRepeatableTestAccount()?"choose":forceLanding?"home":initialScriptId?"dashboard":creatorUser&&hasProfile()?"dashboard":"home");track("page_view",{{source:initialScriptId?"share_script":"portal"}});if(initialScriptId&&!isRepeatableTestAccount()){{openDetail(initialScriptId);if(!creatorUser)setTimeout(()=>openAuth("login"),260)}}if(creatorUser&&!isRepeatableTestAccount())setTimeout(()=>requireKwaiProfile(initialScriptId?"share_script_open":"portal_open"),180)}}bootstrap();
-</script><link rel="stylesheet" href="/static/public-signup.css?v=kwai-link-2"><script src="/static/public-signup.js?v=kwai-link-3"></script></body></html>"""
+</script><link rel="stylesheet" href="/static/public-signup.css?v=kwai-link-2"><script src="/static/public-signup.js?v=kwai-link-3"></script><script src="/static/intro-recommendations.js?v=1"></script></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
