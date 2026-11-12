@@ -3246,7 +3246,7 @@ def build_analytics_event(
     account = account or current_account(headers)
     event_name = re.sub(r"[^0-9A-Za-z_.:-]+", "", str(payload.get("event") or "event"))[:80] or "event"
     meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
-    script_id = normalize_account_key(str(payload.get("script_id") or meta.get("script_id") or ""))
+    script_id = normalize_account_key(str(meta.get("script_id") or payload.get("script_id") or ""))
     if script_id and not re.fullmatch(r"[0-9a-f]{32}", script_id):
         script_id = ""
     try:
@@ -3437,6 +3437,24 @@ CLICK_EVENT_LABELS = {
     "register": "注册",
 }
 
+RECOMMENDATION_VIEW_LABELS = {
+    "featured_detail_open": "展开推荐脚本",
+    "daily_plan_add": "选择拍摄",
+    "daily_script_skip": "跳过推荐脚本",
+    "feature_video_play": "点击参考视频",
+}
+
+
+def analytics_script_view_id(event: dict[str, Any]) -> str:
+    name = event.get("event")
+    if name in RECOMMENDATION_VIEW_LABELS:
+        meta = event.get("meta")
+        script_id = str(meta.get("script_id") or "").strip() if isinstance(meta, dict) else ""
+        return script_id if re.fullmatch(r"[0-9a-f]{32}", script_id) else ""
+    if name in {"script_open", "detail_open"}:
+        return str(event.get("script_id") or "").strip()
+    return ""
+
 
 def submission_matches_account(submission: dict[str, Any], account: dict[str, Any]) -> bool:
     aliases = account_aliases(account)
@@ -3473,8 +3491,7 @@ def creator_analytics_summary_payload(days: int = 180, *, beijing_calendar: bool
     else:
         events = [event for event in all_events if event_in_days(event, days)]
     history_start = min((str(event.get("created_at") or "") for event in all_events if event.get("created_at")), default="")
-    historical_script_ids = sorted({str(event.get("script_id") or "").strip() for event in all_events
-                                    if event.get("event") in {"script_open", "detail_open"} and event.get("script_id")})
+    historical_script_ids = sorted({script_id for event in all_events if (script_id := analytics_script_view_id(event))})
     submissions_raw = read_json_file(SUBMISSIONS_FILE, [])
     submissions = [item for item in (submissions_raw if isinstance(submissions_raw, list) else []) if isinstance(item, dict)]
 
@@ -3490,6 +3507,7 @@ def creator_analytics_summary_payload(days: int = 180, *, beijing_calendar: bool
     brazil_tz = ZoneInfo("America/Sao_Paulo")
     for event in events:
         event_name = str(event.get("event") or "")
+        viewed_script_id = analytics_script_view_id(event)
         account = find_account_from_lookup(str(event.get("account_id") or ""), alias_lookup)
         if account and id(account) not in test_accounts and event_name:
             attribution = account.get("attribution") if isinstance(account.get("attribution"), dict) else {}
@@ -3522,9 +3540,9 @@ def creator_analytics_summary_payload(days: int = 180, *, beijing_calendar: bool
             if event_name in CLICK_EVENT_LABELS:
                 label = CLICK_EVENT_LABELS[event_name]
                 user["click_counts"][label] = user["click_counts"].get(label, 0) + 1
-            if event_name in {"script_open", "detail_open"} and script_id:
+            if viewed_script_id:
                 user["script_share_open_count"] += 1
-                view = user["_script_views"].setdefault(script_id, {"script_id": script_id, "views": 0})
+                view = user["_script_views"].setdefault(viewed_script_id, {"script_id": viewed_script_id, "views": 0})
                 view["views"] += 1
         if account and id(account) not in test_accounts and event_name and event_name != "page_duration":
             created = parse_iso_time(event.get("created_at"))
@@ -3541,9 +3559,7 @@ def creator_analytics_summary_payload(days: int = 180, *, beijing_calendar: bool
                 }
                 weekly_people.setdefault(week, set()).add(id(account))
                 active_account_ids.add(id(account))
-        if event_name not in {"script_open", "detail_open"}:
-            continue
-        script_id = str(event.get("script_id") or "").strip()
+        script_id = viewed_script_id
         if not script_id:
             continue
         raw_script_opens += 1
@@ -3767,7 +3783,7 @@ def creator_campaign_dashboard_payload(days: int = 30, *, month: str = "", since
             continue
         if name and name != "page_duration":
             target["active_creators"].add(str(account.get("account_id")))
-        if name in {"script_open", "detail_open"} and event.get("script_id"):
+        if analytics_script_view_id(event):
             target["script_opens"] += 1
             newcomer = target["new_creator_accounts"].get(str(account.get("account_id") or ""))
             if newcomer is not None:
@@ -3901,18 +3917,20 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
             row["platform_opens"] = int(row.get("platform_opens") or 0) + 1
             row["_platform_people"][actor_key] = person
             append_timeline_detail(row, "platform_open_details", detail)
-        if name in {"script_open", "detail_open"} and script_id:
+        viewed_script_id = analytics_script_view_id(event)
+        if viewed_script_id:
             detail = {
                 **person,
                 "time": str(event.get("created_at") or ""),
                 "path": str(event.get("path") or ""),
                 "referer": str(event.get("referer") or ""),
-                "source": "分享链接" if name == "script_open" else "站内点开",
-                "script_id": script_id,
-                "script_title": cached_script_title(script_id),
+                "source": RECOMMENDATION_VIEW_LABELS.get(name, "分享链接" if name == "script_open" else "站内点开"),
+                "script_id": viewed_script_id,
+                "script_title": cached_script_title(viewed_script_id),
             }
             row["script_opens"] = int(row.get("script_opens") or 0) + 1
-            row["share_link_opens"] = int(row.get("share_link_opens") or 0) + 1
+            if name in {"script_open", "detail_open"}:
+                row["share_link_opens"] = int(row.get("share_link_opens") or 0) + 1
             row["_script_people"][actor_key] = person
             append_timeline_detail(row, "script_open_details", detail)
         if name == "page_duration":
@@ -3993,7 +4011,8 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
             script_id = str(event.get("script_id") or "")
             if name == "site_open":
                 platform_open_count += 1
-            if name in {"script_open", "detail_open"} and script_id:
+            viewed_script_id = analytics_script_view_id(event)
+            if viewed_script_id:
                 script_open_count += 1
             if name == "page_duration":
                 duration_ms = int(event.get("duration_ms") or 0)
@@ -4006,8 +4025,8 @@ def creator_analytics_payload(days: int = 30, *, include_inactive: bool = False)
                     platform_duration_ms += duration_ms
             if name in CLICK_EVENT_LABELS:
                 clicks[name] = clicks.get(name, 0) + 1
-            if script_id and name in {"script_open", "detail_open"}:
-                row = script_stats.setdefault(script_id, {"script_id": script_id, "title": cached_script_title(script_id), "views": 0, "duration_ms": 0})
+            if viewed_script_id:
+                row = script_stats.setdefault(viewed_script_id, {"script_id": viewed_script_id, "title": cached_script_title(viewed_script_id), "views": 0, "duration_ms": 0})
                 row["views"] = int(row.get("views") or 0) + 1
         has_behavior = bool(
             user_events
@@ -5273,7 +5292,17 @@ function refreshRewardBanner(){{const old=document.querySelector(".reward-card")
 function renderFeaturedAndPlan(){{const key=recommendationKey();if(featuredKey!==key){{featuredKey=key;featuredOffset=0}}const candidates=todayCandidates();const slot=document.querySelector("#featured-slot");const plan=document.querySelector("#today-plan-slot");if(!slot||!plan)return;try{{if(!candidates.length)slot.innerHTML="";else if(selectionRoundComplete(candidates))slot.innerHTML=allScriptsPanel();else{{const idx=currentFeaturedIndex(candidates);slot.innerHTML=featuredCard(candidates[idx],idx,candidates.length);preloadImagesAround(idx)}}}}catch(error){{console.error("Creator featured card failed",error);slot.innerHTML=`<section class="state card"><h3>${{lang==="zh"?"推荐卡片暂时无法显示":"Não foi possível montar o card de recomendação"}}</h3><button class="primary" type="button" data-retry-dashboard>${{lang==="zh"?"重试":"Tentar novamente"}}</button></section>`}}try{{plan.innerHTML=todayPlanHtml()}}catch(error){{console.error("Creator shooting plan failed",error);plan.innerHTML=`<section class="state card"><h3>${{lang==="zh"?"拍摄计划暂时无法显示":"Plano de gravação indisponível"}}</h3></section>`}}}}
 function inlineScriptShell(e){{return `<section class="inline-script-section" id="inline-script-${{esc(e.entry_id)}}"><h2>${{lang==="zh"?"具体脚本":"Roteiro detalhado"}}</h2><div id="inline-script-slot-${{esc(e.entry_id)}}" data-script-slot="${{esc(e.entry_id)}}">${{scriptLoading()}}</div></section>`}}
 async function loadInlineScript(e){{const slot=document.querySelector(`#inline-script-slot-${{CSS.escape(e.entry_id)}}`);if(!slot)return;slot.innerHTML=scriptLoading();try{{const html=e.script_html||await fetchScriptHtml(e.entry_id);slot.innerHTML=renderScriptSlot(html,e)}}catch(err){{slot.innerHTML=scriptLoadError(e.entry_id)}}}}
-document.addEventListener("click",event=>{{const trigger=event.target.closest("[data-scroll-script]");if(!trigger||!trigger.closest("[data-feature-card]"))return;const item=entry(trigger.dataset.scrollScript);if(item)loadInlineScript(item)}},true)
+document.addEventListener("click",event=>{{
+    const trigger=event.target.closest("[data-scroll-script]");
+    const card=trigger?.closest("[data-feature-card]");
+    if(!card||card.classList.contains("detail-open"))return;
+    const scriptId=trigger.dataset.scrollScript;
+    const item=entry(scriptId);
+    if(item){{
+        track("featured_detail_open",{{script_id:scriptId}});
+        loadInlineScript(item);
+    }}
+}},true)
 function planCard(e){{const done=missionDone(e.entry_id);const sub=submissionFor(e.entry_id);return `<article class="plan-card plan-card-compact ${{done?"done":""}}"><div class="plan-card-top"><img src="${{esc(scriptImage(e))}}" loading="lazy" alt=""><h3>${{esc(ptTitle(e))}}</h3></div><button class="plan-detail-button" type="button" data-scroll-script="${{esc(e.entry_id)}}">${{lang==="zh"?"点击查看脚本详情":"Ver detalhes do roteiro"}}</button><div class="plan-submit-row plan-submit-row-compact"><input type="url" data-submit-url="${{esc(e.entry_id)}}" placeholder="${{lang==="zh"?"在这里粘贴拍摄好的视频链接":"Cole aqui o link do vídeo gravado"}}"><button class="primary" type="button" data-submit="${{esc(e.entry_id)}}">${{lang==="zh"?"确认上传":"Confirmar"}}</button></div><div class="plan-status" id="submit-status-${{esc(e.entry_id)}}">${{sub?esc(submissionReviewText(sub)):""}}</div></article>`}}
 function todayPlanHtml(){{const picks=missionPickedEntries();const done=picks.filter(e=>missionDone(e.entry_id)).length;const total=Math.max(1,picks.length);const pct=picks.length?Math.min(100,Math.round(done/total*100)):0;const progressText=picks.length?`${{done}}/${{picks.length}}`:"0/0";const list=picks.length?picks.map(planCard).join(""):`<section class="plan-empty"><b>${{lang==="zh"?"先选择今天要拍的脚本":"Escolha os roteiros de hoje"}}</b><span>${{lang==="zh"?"从上方推荐卡片里选择脚本，加入后这里会变成你的拍摄计划和回传入口。":"Toque em Adicionar ao plano nos cards acima. Eles aparecem aqui com o campo para enviar o vídeo."}}</span></section>`;return `<section class="today-plan" id="today-plan"><div class="today-plan-head"><h2>${{lang==="zh"?"今日拍摄计划":"Plano de gravação de hoje"}}</h2><div class="plan-progress-row"><span class="today-plan-progress">${{lang==="zh"?"已完成":"Concluído"}}: ${{progressText}}</span><div class="plan-progress-track"><i style="width:${{pct}}%"></i></div></div></div><div class="plan-list">${{list}}</div></section>`}}
 
@@ -5427,7 +5456,7 @@ document.addEventListener("click",e=>{{const play=e.target.closest("[data-detail
 document.addEventListener("click",e=>{{if(e.target.closest("[data-all-load-more]"))loadMoreAllScripts()}})
 document.addEventListener("click",e=>{{const nav=e.target.closest("[data-shot-nav]");if(!nav)return;const table=nav.closest(".script-table-card");const carousel=table?.querySelector("[data-shot-carousel]");const cards=[...(carousel?.querySelectorAll("[data-shot-index]")||[])];if(!carousel||!cards.length)return;const current=shotCarouselIndex(carousel);const target=Math.max(0,Math.min(cards.length-1,current+(nav.dataset.shotNav==="next"?1:-1)));carousel.scrollTo({{left:cards[target].offsetLeft-carousel.offsetLeft-12,behavior:"smooth"}})}})
 document.addEventListener("click",e=>{{const nav=e.target.closest("[data-insight-nav]");if(!nav)return;const section=nav.closest(".insight-carousel-card");const carousel=section?.querySelector("[data-insight-carousel]");const cards=[...(carousel?.querySelectorAll("[data-insight-index]")||[])];if(!carousel||!cards.length)return;const current=insightCarouselIndex(carousel);const target=Math.max(0,Math.min(cards.length-1,current+(nav.dataset.insightNav==="next"?1:-1)));carousel.scrollTo({{left:cards[target].offsetLeft-carousel.offsetLeft-12,behavior:"smooth"}})}})
-document.addEventListener("click",async e=>{{const logoutButton=e.target.closest("[data-logout]");if(logoutButton){{logout(logoutButton);return}}if(e.target.closest("[data-feature-restart]")){{featuredOffset=0;renderFeaturedAndPlan();return}}if(e.target.closest("[data-week-apply]")){{alert((lang==="zh"?"请联系 WhatsApp 申请下一周任务：":"Fale no WhatsApp para liberar a próxima semana: ")+"+86 13726250870");return}}const featurePlay=e.target.closest("[data-feature-play]");if(featurePlay){{track("feature_video_play",{{script_id:featurePlay.dataset.featurePlay||""}});playFeaturedVideo(featurePlay.dataset.featurePlay);return}}if(e.target.closest("[data-feature-next]")){{stopFeaturedVideo();track("feature_next");const card=document.querySelector("[data-feature-card]");if(card)card.classList.add("slide-left");setTimeout(()=>{{featuredOffset++;renderFeaturedAndPlan()}},440);return}}const planBtn=e.target.closest("[data-plan-script]");if(planBtn){{const id=planBtn.dataset.planScript;const ok=addToTodayPlan(id);if(!ok)return;uiMessage(uiCopy("Roteiro adicionado ao plano de hoje.","脚本已加入今日计划。"),"success");const featureCard=planBtn.closest("[data-feature-card]");if(featureCard){{track("daily_plan_add",{{script_id:id}});featureCard.classList.add("slide-right");setTimeout(()=>{{featuredOffset++;renderFeaturedAndPlan()}},440)}}else{{renderCurrent()}}return}}const skipBtn=e.target.closest("[data-feature-skip]");if(skipBtn){{const featureCard=skipBtn.closest("[data-feature-card]");if(featureCard){{featureCard.classList.add("slide-left")}}track("daily_script_skip");setTimeout(()=>{{featuredOffset++;renderFeaturedAndPlan()}},440);return}}const scrollScript=e.target.closest("[data-scroll-script]");if(scrollScript){{const card=scrollScript.closest("[data-feature-card]");if(card){{card.classList.toggle("detail-open");if(card.classList.contains("detail-open")){{setTimeout(()=>card.querySelector(".inline-script-section")?.scrollIntoView({{behavior:"smooth",block:"nearest"}}),80)}}}}else{{openDetail(scrollScript.dataset.scrollScript)}}return}}const missionPick=e.target.closest("[data-mission-pick]");if(missionPick){{const id=missionPick.dataset.missionPick;const state=missionState();if(state.picks.includes(id)){{state.picks=state.picks.filter(x=>x!==id)}}else if(state.picks.length<3){{state.picks.push(id)}}else{{uiMessage(uiCopy("Escolha no máximo 3 roteiros por dia.","今天最多选择 3 个脚本。"),"error");return}}saveWorkspace();renderMissions();setTimeout(()=>document.querySelector("#mission-plan")?.scrollIntoView({{behavior:"smooth",block:"start"}}),120);return}}if(e.target.closest("[data-mission-guide-open]")){{sessionStorage.removeItem(`koko_mission_guide_${{missionDayKey()}}`);openMissionGuide();return}}if(e.target.closest("[data-mission-guide-x]")){{closeMissionGuide();return}}if(e.target.closest("[data-mission-guide-close]")){{if(!document.querySelector("#mission-read")?.checked){{uiMessage(uiCopy("Marque que leu a regra primeiro.","请先勾选已读。"),"error");return}}closeMissionGuide();return}}if(e.target.closest("[data-mission-ranking-open]")){{const done=missionPickedEntries().filter(e=>missionDone(e.entry_id)).length;openMissionRanking(done);return}}if(e.target.closest("[data-mission-ranking-close]")){{closeMissionRanking();return}}if(e.target.closest("[data-mission-reset]")){{missionState().picks=[];saveWorkspace();renderMissions();uiMessage(uiCopy("Seleção de hoje redefinida.","今日选择已重置。"),"success");return}}if(e.target.closest("[data-mission-pool-toggle]")){{document.querySelector(".mission-pick-pool")?.classList.remove("collapsed");return}}const upload=e.target.closest("[data-upload-trigger]");if(upload){{document.querySelector(`#profile-${{upload.dataset.uploadTrigger}}-input`)?.click();return}}const jump=e.target.closest("[data-tab-jump]");if(jump){{stopFeaturedVideo();savedTab=jump.dataset.tabJump;show("saved");return}}const authOpen=e.target.closest("[data-auth-open]");if(authOpen){{openAuth(authOpen.dataset.authOpen||"login");return}}if(e.target.closest("[data-auth-close]")){{closeAuth();return}}const authToggle=e.target.closest("[data-auth-toggle]");if(authToggle){{setAuthMode(authMode==="register"?"login":"register");return}}const reselect=e.target.closest("[data-reselect]");if(reselect){{stopFeaturedVideo();show("choose");return}}const stepNav=e.target.closest("[data-step]");if(stepNav){{step=Number(stepNav.dataset.step)||0;renderQuestion();return}}if(e.target.closest("#prev-step")){{goStep(-1);return}}const tab=e.target.closest("[data-tab]");if(tab){{savedTab=tab.dataset.tab;renderSaved();return}}const shootMonth=e.target.closest("[data-shoot-month]");if(shootMonth){{shiftScheduleMonth(Number(shootMonth.dataset.shootMonth)||0);return}}const shootDate=e.target.closest("[data-shoot-date]");if(shootDate){{scheduleViewDate=shootDate.dataset.shootDate;renderScheduleFeed();return}}const d=e.target.closest("[data-detail]");if(d){{stopFeaturedVideo();track("detail_open",{{script_id:d.dataset.detail||""}});openDetail(d.dataset.detail);return}}if(e.target.closest("[data-close]")||e.target.id==="modal"){{closeDetail();return}}const copy=e.target.closest("[data-copy-share]");if(copy){{const id=copy.dataset.copyShare;track("share_click",{{script_id:id}});const ok=await copyText(shareUrl(id));showShareLink(id,ok);const label=copy.querySelector("span");if(label)label.textContent=ok?(lang==="zh"?"已复制":"Copiado"):(lang==="zh"?"复制失败，请手动复制":"Copie manualmente");uiMessage(ok?uiCopy("Link copiado.","链接已复制。"):uiCopy("Copie o link manualmente.","复制失败，请手动复制。"),ok?"success":"error");return}}const scrollSubmit=e.target.closest("[data-submit-scroll]");if(scrollSubmit){{track("submit_click",{{script_id:scrollSubmit.dataset.submitScroll||""}});document.querySelector(`[data-submit-url="${{scrollSubmit.dataset.submitScroll}}"]`)?.scrollIntoView({{behavior:"smooth",block:"center"}});return}}const sub=e.target.closest("[data-submit]");if(sub){{track("submit_click",{{script_id:sub.dataset.submit||""}});submitVideo(sub.dataset.submit,sub);return}}const st=e.target.closest("[data-status]");if(st){{if(st.dataset.status==="saved")track("save_click",{{script_id:st.dataset.entry||""}});const inDetail=!!st.closest("#detail");setStatus(st.dataset.entry,st.dataset.status);uiMessage(st.dataset.status==="saved"?uiCopy("Roteiro salvo.","脚本已收藏。"):st.dataset.status==="planned"?uiCopy("Marcado para gravar.","已标记为准备拍摄。"):uiCopy("Status atualizado.","状态已更新。"),"success");if(inDetail){{const fresh=entry(st.dataset.entry);if(fresh)renderDetail(fresh)}}else{{const label=st.querySelector("span");if(label)label.textContent=t(st.dataset.status==="saved"?"saved":st.dataset.status==="planned"?"plan":"save")}}return}}const go=e.target.closest("[data-go]");if(go){{stopFeaturedVideo();if(go.dataset.go==="all-scripts")track("all_scripts_open");if(go.dataset.go==="saved")track("profile_open");if(go.dataset.savedTab)savedTab=go.dataset.savedTab;show(go.dataset.go);return}}const ans=e.target.closest("[data-answer]");if(ans){{const q=questions.find(item=>item.id===ans.dataset.answer);if(isMultipleQuestion(q)){{const values=answerValues(q.id);answers[q.id]=values.includes(ans.dataset.value)?values.filter(v=>v!==ans.dataset.value):[...values,ans.dataset.value];normalizeAnswers();saveProfile();renderQuestion();}}else{{answers[ans.dataset.answer]=ans.dataset.value;normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard");}}return}}if(e.target.closest("#next-step")){{normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard")}}}});
+document.addEventListener("click",async e=>{{const logoutButton=e.target.closest("[data-logout]");if(logoutButton){{logout(logoutButton);return}}if(e.target.closest("[data-feature-restart]")){{featuredOffset=0;renderFeaturedAndPlan();return}}if(e.target.closest("[data-week-apply]")){{alert((lang==="zh"?"请联系 WhatsApp 申请下一周任务：":"Fale no WhatsApp para liberar a próxima semana: ")+"+86 13726250870");return}}const featurePlay=e.target.closest("[data-feature-play]");if(featurePlay){{track("feature_video_play",{{script_id:featurePlay.dataset.featurePlay||""}});playFeaturedVideo(featurePlay.dataset.featurePlay);return}}if(e.target.closest("[data-feature-next]")){{stopFeaturedVideo();track("feature_next");const card=document.querySelector("[data-feature-card]");if(card)card.classList.add("slide-left");setTimeout(()=>{{featuredOffset++;renderFeaturedAndPlan()}},440);return}}const planBtn=e.target.closest("[data-plan-script]");if(planBtn){{const id=planBtn.dataset.planScript;const ok=addToTodayPlan(id);if(!ok)return;uiMessage(uiCopy("Roteiro adicionado ao plano de hoje.","脚本已加入今日计划。"),"success");const featureCard=planBtn.closest("[data-feature-card]");if(featureCard){{track("daily_plan_add",{{script_id:id}});featureCard.classList.add("slide-right");setTimeout(()=>{{featuredOffset++;renderFeaturedAndPlan()}},440)}}else{{renderCurrent()}}return}}const skipBtn=e.target.closest("[data-feature-skip]");if(skipBtn){{const featureCard=skipBtn.closest("[data-feature-card]");if(featureCard){{featureCard.classList.add("slide-left")}}track("daily_script_skip",{{script_id:featureCard?.dataset.featureCard||""}});setTimeout(()=>{{featuredOffset++;renderFeaturedAndPlan()}},440);return}}const scrollScript=e.target.closest("[data-scroll-script]");if(scrollScript){{const card=scrollScript.closest("[data-feature-card]");if(card){{card.classList.toggle("detail-open");if(card.classList.contains("detail-open")){{setTimeout(()=>card.querySelector(".inline-script-section")?.scrollIntoView({{behavior:"smooth",block:"nearest"}}),80)}}}}else{{openDetail(scrollScript.dataset.scrollScript)}}return}}const missionPick=e.target.closest("[data-mission-pick]");if(missionPick){{const id=missionPick.dataset.missionPick;const state=missionState();if(state.picks.includes(id)){{state.picks=state.picks.filter(x=>x!==id)}}else if(state.picks.length<3){{state.picks.push(id)}}else{{uiMessage(uiCopy("Escolha no máximo 3 roteiros por dia.","今天最多选择 3 个脚本。"),"error");return}}saveWorkspace();renderMissions();setTimeout(()=>document.querySelector("#mission-plan")?.scrollIntoView({{behavior:"smooth",block:"start"}}),120);return}}if(e.target.closest("[data-mission-guide-open]")){{sessionStorage.removeItem(`koko_mission_guide_${{missionDayKey()}}`);openMissionGuide();return}}if(e.target.closest("[data-mission-guide-x]")){{closeMissionGuide();return}}if(e.target.closest("[data-mission-guide-close]")){{if(!document.querySelector("#mission-read")?.checked){{uiMessage(uiCopy("Marque que leu a regra primeiro.","请先勾选已读。"),"error");return}}closeMissionGuide();return}}if(e.target.closest("[data-mission-ranking-open]")){{const done=missionPickedEntries().filter(e=>missionDone(e.entry_id)).length;openMissionRanking(done);return}}if(e.target.closest("[data-mission-ranking-close]")){{closeMissionRanking();return}}if(e.target.closest("[data-mission-reset]")){{missionState().picks=[];saveWorkspace();renderMissions();uiMessage(uiCopy("Seleção de hoje redefinida.","今日选择已重置。"),"success");return}}if(e.target.closest("[data-mission-pool-toggle]")){{document.querySelector(".mission-pick-pool")?.classList.remove("collapsed");return}}const upload=e.target.closest("[data-upload-trigger]");if(upload){{document.querySelector(`#profile-${{upload.dataset.uploadTrigger}}-input`)?.click();return}}const jump=e.target.closest("[data-tab-jump]");if(jump){{stopFeaturedVideo();savedTab=jump.dataset.tabJump;show("saved");return}}const authOpen=e.target.closest("[data-auth-open]");if(authOpen){{openAuth(authOpen.dataset.authOpen||"login");return}}if(e.target.closest("[data-auth-close]")){{closeAuth();return}}const authToggle=e.target.closest("[data-auth-toggle]");if(authToggle){{setAuthMode(authMode==="register"?"login":"register");return}}const reselect=e.target.closest("[data-reselect]");if(reselect){{stopFeaturedVideo();show("choose");return}}const stepNav=e.target.closest("[data-step]");if(stepNav){{step=Number(stepNav.dataset.step)||0;renderQuestion();return}}if(e.target.closest("#prev-step")){{goStep(-1);return}}const tab=e.target.closest("[data-tab]");if(tab){{savedTab=tab.dataset.tab;renderSaved();return}}const shootMonth=e.target.closest("[data-shoot-month]");if(shootMonth){{shiftScheduleMonth(Number(shootMonth.dataset.shootMonth)||0);return}}const shootDate=e.target.closest("[data-shoot-date]");if(shootDate){{scheduleViewDate=shootDate.dataset.shootDate;renderScheduleFeed();return}}const d=e.target.closest("[data-detail]");if(d){{stopFeaturedVideo();track("detail_open",{{script_id:d.dataset.detail||""}});openDetail(d.dataset.detail);return}}if(e.target.closest("[data-close]")||e.target.id==="modal"){{closeDetail();return}}const copy=e.target.closest("[data-copy-share]");if(copy){{const id=copy.dataset.copyShare;track("share_click",{{script_id:id}});const ok=await copyText(shareUrl(id));showShareLink(id,ok);const label=copy.querySelector("span");if(label)label.textContent=ok?(lang==="zh"?"已复制":"Copiado"):(lang==="zh"?"复制失败，请手动复制":"Copie manualmente");uiMessage(ok?uiCopy("Link copiado.","链接已复制。"):uiCopy("Copie o link manualmente.","复制失败，请手动复制。"),ok?"success":"error");return}}const scrollSubmit=e.target.closest("[data-submit-scroll]");if(scrollSubmit){{track("submit_click",{{script_id:scrollSubmit.dataset.submitScroll||""}});document.querySelector(`[data-submit-url="${{scrollSubmit.dataset.submitScroll}}"]`)?.scrollIntoView({{behavior:"smooth",block:"center"}});return}}const sub=e.target.closest("[data-submit]");if(sub){{track("submit_click",{{script_id:sub.dataset.submit||""}});submitVideo(sub.dataset.submit,sub);return}}const st=e.target.closest("[data-status]");if(st){{if(st.dataset.status==="saved")track("save_click",{{script_id:st.dataset.entry||""}});const inDetail=!!st.closest("#detail");setStatus(st.dataset.entry,st.dataset.status);uiMessage(st.dataset.status==="saved"?uiCopy("Roteiro salvo.","脚本已收藏。"):st.dataset.status==="planned"?uiCopy("Marcado para gravar.","已标记为准备拍摄。"):uiCopy("Status atualizado.","状态已更新。"),"success");if(inDetail){{const fresh=entry(st.dataset.entry);if(fresh)renderDetail(fresh)}}else{{const label=st.querySelector("span");if(label)label.textContent=t(st.dataset.status==="saved"?"saved":st.dataset.status==="planned"?"plan":"save")}}return}}const go=e.target.closest("[data-go]");if(go){{stopFeaturedVideo();if(go.dataset.go==="all-scripts")track("all_scripts_open");if(go.dataset.go==="saved")track("profile_open");if(go.dataset.savedTab)savedTab=go.dataset.savedTab;show(go.dataset.go);return}}const ans=e.target.closest("[data-answer]");if(ans){{const q=questions.find(item=>item.id===ans.dataset.answer);if(isMultipleQuestion(q)){{const values=answerValues(q.id);answers[q.id]=values.includes(ans.dataset.value)?values.filter(v=>v!==ans.dataset.value):[...values,ans.dataset.value];normalizeAnswers();saveProfile();renderQuestion();}}else{{answers[ans.dataset.answer]=ans.dataset.value;normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard");}}return}}if(e.target.closest("#next-step")){{normalizeAnswers();saveProfile();if(!goStep(1))show("dashboard")}}}});
 document.addEventListener("click",e=>{{const dateBtn=e.target.closest("[data-schedule-date]");if(dateBtn){{scheduleSelectedDate=dateBtn.dataset.scheduleDate;renderCalendar();return}}if(e.target.closest("[data-schedule-close]")){{closeScheduleModal();return}}if(e.target.closest("[data-schedule-confirm]")){{if(scheduleDraftId){{saveScheduleItem(scheduleDraftId,scheduleSelectedDate||todayKey());savedTab="schedule";closeScheduleModal();show("saved");uiMessage(uiCopy("Roteiro adicionado ao calendário.","脚本已加入拍摄日历。"),"success")}}return}}}});document.addEventListener("click",e=>{{const st=e.target.closest("[data-status]");if(st&&st.dataset.status==="saved"){{const id=st.dataset.entry;setTimeout(()=>openScheduleModal(id),80)}}}});
 document.addEventListener("pointerdown",e=>{{const control=e.target.closest("button,a,.option,.calendar-day");if(control)pulseControl(control)}},true);
 document.addEventListener("click",e=>{{const link=e.target.closest('a[target="_blank"]');if(link)uiMessage(uiCopy("Abrindo em uma nova página...","正在打开新页面..."),"loading",900)}},true);

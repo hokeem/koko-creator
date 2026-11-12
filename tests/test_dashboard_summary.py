@@ -7,6 +7,31 @@ import app
 
 
 class DashboardSummaryTests(unittest.TestCase):
+    def test_recommendation_actions_count_toward_the_clicked_script(self):
+        clicked_id = "a" * 32
+        previous_id = "b" * 32
+        account = {"account_id": "creator-a", "registration_status": "registered"}
+        events = [
+            app.build_analytics_event(
+                {"event": name, "script_id": previous_id, "meta": {"script_id": clicked_id}},
+                {}, account=account,
+            )
+            for name in ("featured_detail_open", "daily_plan_add", "daily_script_skip", "feature_video_play")
+        ]
+        self.assertTrue(all(event["script_id"] == clicked_id for event in events))
+        # Older skip events could inherit the last detail's ID from the page.
+        events.append({"event": "daily_script_skip", "script_id": previous_id,
+                       "account_id": "creator-a", "created_at": app.now_iso()})
+        with (patch.object(app, "load_accounts", return_value=[account]),
+              patch.object(app, "load_analytics_events", return_value=events),
+              patch.object(app, "read_json_file", return_value=[]),
+              patch.object(app, "load_creator_profiles", return_value=[])):
+            result = app.creator_analytics_summary_payload(7, beijing_calendar=True)
+        self.assertEqual(result["summary"]["script_opens"], 4)
+        self.assertEqual(result["users"][0]["script_share_open_count"], 4)
+        self.assertEqual(result["users"][0]["script_views"], [{"script_id": clicked_id, "views": 4}])
+        self.assertEqual(result["historical_script_opened_ids"], [clicked_id])
+
     def test_all_time_includes_events_older_than_rolling_window(self):
         old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
         account = {"account_id": "creator-a", "registration_status": "registered"}
